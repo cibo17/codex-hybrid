@@ -1,0 +1,15 @@
+{
+  "name": "codex-hybrid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "install:local": "node install.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "https-proxy-agent": "7.0.6",
+    "undici": "7.29.0",
+    "ws": "8.21.1"
+  }
+}
