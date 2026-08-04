@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { hybridActivation, providerRegistryEditor } from "./activation.mjs";
+import { hybridActivation, providerRegistryEditor } from "../src/activation.mjs";
 
 function fail(message) {
   process.stderr.write(`codex-hybrid: ${message}\n`);

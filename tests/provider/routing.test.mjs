@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ModelRoutingPipeline } from "./model-routing.mjs";
+import { ModelRoutingPipeline } from "../../src/provider/routing.mjs";
 
 function route() {
   return {

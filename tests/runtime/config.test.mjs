@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runtimeConfig } from "./runtime-config.mjs";
+import { runtimeConfig } from "../../src/runtime-config.mjs";
 
 test("one runtime configuration controls router, registry, vision, and the project runtime", () => {
   const config = runtimeConfig({ CODEX_HYBRID_PORT: "19123" }, "/tmp/hybrid-home");

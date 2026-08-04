@@ -13,7 +13,7 @@ import {
   sanitizeHistoryForOpenAI,
   stripHybridVisionTools,
   suppressViewImageTool,
-} from "./vision-bridge.mjs";
+} from "../../src/vision/bridge.mjs";
 
 test("removes hybrid vision tools from top-level and deferred collections", () => {
   const body = stripHybridVisionTools({

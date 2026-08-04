@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 function run(home, args) {
-  const result = spawnSync(process.execPath, [path.join(process.cwd(), "codex-hybrid.mjs"), ...args], {
+  const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "codex-hybrid.mjs"), ...args], {
     cwd: process.cwd(),
     env: { ...process.env, CODEX_HYBRID_HOME: home },
     encoding: "utf8",

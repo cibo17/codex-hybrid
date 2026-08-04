@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
-import { runtimeConfig } from "./runtime-config.mjs";
+import { runtimeConfig } from "../runtime-config.mjs";
 
 const runtime = runtimeConfig();
 const TOKEN_FILE = runtime.visionTokenFile;

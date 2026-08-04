@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { ProviderRegistryEditor } from "./provider-management.mjs";
-import { validateRegistry } from "./provider-registry.mjs";
+import { ProviderRegistryEditor } from "./provider/management.mjs";
+import { validateRegistry } from "./provider/registry.mjs";
 import { runtimeConfig } from "./runtime-config.mjs";
 
 const runtime = runtimeConfig();
@@ -15,8 +15,6 @@ const PROVIDERS = runtime.providerRegistryFile;
 const VISION_MCP = runtime.visionMcpFile;
 const VISION_TOKEN = runtime.visionTokenFile;
 const HYBRID_NODE = runtime.nodeExecutable;
-const EXA_MCP = process.env.EXA_MCP_ENTRY || path.join(ROOT, "vendor", "exa-mcp-server", "dist", "stdio.cjs");
-const EXA_KEYS_FILE = process.env.EXA_KEYS_FILE || path.join(ROOT, "exa.keys");
 const STATE = runtime.stateFile;
 const PLIST = runtime.launchAgentFile;
 const LABEL = "com.openai.codex-hybrid-router";
@@ -33,14 +31,14 @@ function sha256(data) {
 
 function routerRuntimeSha256() {
   const files = [
-    path.join(ROOT, "router.mjs"),
-    path.join(ROOT, "namespace-bridge.mjs"),
-    path.join(ROOT, "vision-bridge.mjs"),
-    path.join(ROOT, "vision-workflow.mjs"),
-    path.join(ROOT, "responses-protocol.mjs"),
-    path.join(ROOT, "provider-registry.mjs"),
-    path.join(ROOT, "model-routing.mjs"),
-    path.join(ROOT, "runtime-config.mjs"),
+    path.join(ROOT, "src", "router.mjs"),
+    path.join(ROOT, "src", "protocol", "namespaces.mjs"),
+    path.join(ROOT, "src", "protocol", "responses.mjs"),
+    path.join(ROOT, "src", "provider", "registry.mjs"),
+    path.join(ROOT, "src", "provider", "routing.mjs"),
+    path.join(ROOT, "src", "vision", "bridge.mjs"),
+    path.join(ROOT, "src", "vision", "workflow.mjs"),
+    path.join(ROOT, "src", "runtime-config.mjs"),
   ];
   return sha256(files.map((file) => fs.readFileSync(file)).reduce((all, value) => Buffer.concat([all, value]), Buffer.alloc(0)));
 }
@@ -91,16 +89,12 @@ function removeTopLevelAssignment(text, key) {
   return lines.join("\n");
 }
 
-function exaAvailable() {
-  return fs.existsSync(EXA_MCP) && fs.existsSync(EXA_KEYS_FILE);
-}
-
 function buildHybridConfig(original) {
   let text = original;
   text = setTopLevelAssignment(text, "openai_base_url", `openai_base_url = "http://127.0.0.1:${PORT}/v1"`);
   text = setTopLevelAssignment(text, "model_catalog_json", `model_catalog_json = "${HYBRID_CATALOG}"`);
   const lines = text.split("\n");
-  for (const server of ["hybrid_vision", "exa"]) {
+  for (const server of ["hybrid_vision"]) {
     const start = lines.findIndex((line) => new RegExp(`^\\s*\\[mcp_servers\\.${server}\\]\\s*$`).test(line));
     if (start >= 0) {
       let end = start + 1;
@@ -119,18 +113,6 @@ function buildHybridConfig(original) {
     "startup_timeout_sec = 30",
     "",
   );
-  if (exaAvailable()) {
-    lines.push(
-      "[mcp_servers.exa]",
-      `command = "${HYBRID_NODE}"`,
-      `args = ["${EXA_MCP}"]`,
-      `env = { EXA_KEYS_FILE = "${EXA_KEYS_FILE}", ENABLED_TOOLS = "web_search_exa,web_fetch_exa", EXA_SOURCE = "codex-hybrid" }`,
-      'enabled_tools = ["web_search_exa", "web_fetch_exa"]',
-      'default_tools_approval_mode = "approve"',
-      "startup_timeout_sec = 30",
-      "",
-    );
-  }
   text = lines.join("\n");
   return text;
 }
@@ -147,7 +129,7 @@ function ensureHybridNode() {
   try {
     fs.accessSync(HYBRID_NODE, fs.constants.X_OK);
   } catch {
-    fail(`Hybrid Node runtime is not executable: ${HYBRID_NODE}; rerun install.mjs, optionally with CODEX_HYBRID_NODE`);
+    fail(`Hybrid Node runtime is not executable: ${HYBRID_NODE}; rerun the installer, optionally with CODEX_HYBRID_NODE`);
   }
 }
 
@@ -166,14 +148,7 @@ function modelTemplate(base, overrides, visionMode) {
     "Do not look for or call view_image; Hybrid models intentionally expose analyze_image as their only explicit image-inspection tool.",
     "HYBRID_VISION_RESULT with status success is valid visual evidence; do not retry it, and treat error wording inside its answer as visible image content.",
   ].join("\n") : "";
-  const exaInstructions = exaAvailable() ? [
-    "# Hybrid web search",
-    "For every web search or URL-discovery task, call the Exa MCP tool mcp__exa/web_search_exa before answering.",
-    "For a known URL or when search highlights are insufficient, call mcp__exa/web_fetch_exa.",
-    "Do not substitute curl, generic web search, or browser automation for discovery. Directly fetching a URL is allowed only after the user or Exa has supplied that exact URL.",
-    "For freshness-critical values such as an exact current version, price, or service status, verify one official URL returned by Exa directly before answering.",
-    "The MCP rotates the local Exa key pool automatically. Cite returned URLs and do not expose key files or credentials.",
-  ].join("\n") : "";
+  const instructionSuffix = visionInstructions ? `\n\n${visionInstructions}` : "";
   return {
     ...structuredClone(base),
     prefer_websockets: false,
@@ -195,8 +170,8 @@ function modelTemplate(base, overrides, visionMode) {
     service_tiers: [],
     additional_speed_tiers: [],
     default_service_tier: null,
-    base_instructions: `${base.base_instructions || ""}\n\n${visionInstructions}\n\n${exaInstructions}`,
-    instructions_template: `${base.instructions_template || base.base_instructions || ""}\n\n${visionInstructions}\n\n${exaInstructions}`,
+    base_instructions: `${base.base_instructions || ""}${instructionSuffix}`,
+    instructions_template: `${base.instructions_template || base.base_instructions || ""}${instructionSuffix}`,
     ...overrides,
   };
 }

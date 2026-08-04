@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 import WebSocket from "ws";
 
-import { writeRegistry } from "./provider-registry.mjs";
+import { writeRegistry } from "../../src/provider/registry.mjs";
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -82,7 +82,7 @@ test("routes any configured Responses Provider through the generic protocol modu
   });
 
   const routerPort = await freePort();
-  const child = spawn(process.execPath, [path.join(process.cwd(), "router.mjs")], {
+  const child = spawn(process.execPath, [path.join(process.cwd(), "src", "router.mjs")], {
     cwd: process.cwd(),
     env: {
       ...process.env,

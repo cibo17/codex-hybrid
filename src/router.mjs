@@ -13,16 +13,16 @@ import {
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { NamespaceBridge, adaptNamespacesForProvider } from "./namespace-bridge.mjs";
-import { ModelRoutingPipeline } from "./model-routing.mjs";
-import { ProviderRegistry } from "./provider-registry.mjs";
+import { NamespaceBridge, adaptNamespacesForProvider } from "./protocol/namespaces.mjs";
+import { ModelRoutingPipeline } from "./provider/routing.mjs";
+import { ProviderRegistry } from "./provider/registry.mjs";
 import {
   ResponsesEventAdapter,
   ResponsesSseAdapter,
   readResponsesSse,
   transformResponseObject,
-} from "./responses-protocol.mjs";
-import { VisionEvidenceWorkflow } from "./vision-workflow.mjs";
+} from "./protocol/responses.mjs";
+import { VisionEvidenceWorkflow } from "./vision/workflow.mjs";
 import { runtimeConfig } from "./runtime-config.mjs";
 
 const runtime = runtimeConfig();

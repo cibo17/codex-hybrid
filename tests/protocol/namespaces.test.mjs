@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { adaptNamespacesForProvider, restoreNamespaces } from "./namespace-bridge.mjs";
+import { adaptNamespacesForProvider, restoreNamespaces } from "../../src/protocol/namespaces.mjs";
 
 const fn = (name) => ({ name, description: name, parameters: { type: "object", properties: {} } });
 

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
-import { readResponsesSse } from "./responses-protocol.mjs";
+import { readResponsesSse } from "../protocol/responses.mjs";
 import {
   VisionCache,
   bindHybridVisionContext,
@@ -11,7 +11,7 @@ import {
   sanitizeHistoryForOpenAI,
   stripHybridVisionTools,
   suppressViewImageTool,
-} from "./vision-bridge.mjs";
+} from "./bridge.mjs";
 
 export class VisionEvidenceWorkflow {
   constructor({

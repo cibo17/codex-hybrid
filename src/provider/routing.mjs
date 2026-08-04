@@ -1,5 +1,5 @@
-import { resolveCredential } from "./provider-registry.mjs";
-import { adaptRequestForProvider } from "./responses-protocol.mjs";
+import { resolveCredential } from "./registry.mjs";
+import { adaptRequestForProvider } from "../protocol/responses.mjs";
 
 export class ModelRoutingPipeline {
   constructor({ registry, visionWorkflow, credentialResolver = resolveCredential }) {

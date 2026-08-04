@@ -11,7 +11,7 @@ import {
   resolveCredential,
   validateRegistry,
   writeRegistry,
-} from "./provider-registry.mjs";
+} from "../../src/provider/registry.mjs";
 
 test("default registry preserves the existing Ollama model routes", () => {
   const registry = validateRegistry(defaultRegistry());

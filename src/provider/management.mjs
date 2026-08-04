@@ -5,7 +5,7 @@ import {
   publicRegistry,
   validateRegistry,
   writeRegistry,
-} from "./provider-registry.mjs";
+} from "./registry.mjs";
 
 export class ProviderRegistryEditor {
   constructor(file) {

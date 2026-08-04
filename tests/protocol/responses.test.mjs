@@ -7,7 +7,7 @@ import {
   adaptRequestForProvider,
   parseSseBlock,
   transformResponseObject,
-} from "./responses-protocol.mjs";
+} from "../../src/protocol/responses.mjs";
 
 test("converts Codex request extensions into portable Responses fields", () => {
   const result = adaptRequestForProvider({

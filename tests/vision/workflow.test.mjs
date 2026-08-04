@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { VisionEvidenceWorkflow } from "./vision-workflow.mjs";
+import { VisionEvidenceWorkflow } from "../../src/vision/workflow.mjs";
 
 function workflow(tokenFile, fetch = async () => assert.fail("unexpected Luna call")) {
   return new VisionEvidenceWorkflow({

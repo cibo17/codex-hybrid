@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ProviderRegistryEditor } from "./provider-management.mjs";
+import { ProviderRegistryEditor } from "../../src/provider/management.mjs";
 
 test("provider and model changes share validation and atomic persistence", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "provider-editor-"));

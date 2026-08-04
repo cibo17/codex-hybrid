@@ -3,7 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import {
   adaptNamespacesForProvider,
   restoreNamespaces,
-} from "./namespace-bridge.mjs";
+} from "./namespaces.mjs";
 
 function patchFromArguments(argumentsText) {
   if (typeof argumentsText !== "string") return "";

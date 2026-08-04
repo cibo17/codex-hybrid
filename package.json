@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "install:local": "node install.mjs",
-    "test": "node --test *.test.mjs"
+    "install:local": "node scripts/install.mjs",
+    "test": "node --test tests/**/*.test.mjs"
   },
   "dependencies": {
     "https-proxy-agent": "7.0.6",

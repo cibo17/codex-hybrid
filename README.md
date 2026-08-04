@@ -133,22 +133,16 @@ unset OLLAMA_PRO_KEY
 
 ## Optional Exa MCP
 
-Codex Hybrid can register the official
-[`exa-mcp-server`](https://github.com/exa-labs/exa-mcp-server), pinned to commit
-`a664592b5dd7c5598b70158c771dcc5c2a4fb2c1`. The included patch adds local key-pool rotation without
-changing Exa's tool names, schemas, transport, or result formatting.
+Exa is independent from Codex Hybrid. Install Exa's official hosted MCP directly in Codex if you
+want its standard `web_search_exa` and `web_fetch_exa` tools:
 
 ```sh
-git clone https://github.com/exa-labs/exa-mcp-server.git ~/.codex/hybrid/vendor/exa-mcp-server
-git -C ~/.codex/hybrid/vendor/exa-mcp-server checkout a664592b5dd7c5598b70158c771dcc5c2a4fb2c1
-git -C ~/.codex/hybrid/vendor/exa-mcp-server apply "$PWD/patches/exa-key-pool.patch"
-npm ci --prefix ~/.codex/hybrid/vendor/exa-mcp-server
-npm run build --prefix ~/.codex/hybrid/vendor/exa-mcp-server
+codex mcp add exa --url https://mcp.exa.ai/mcp
 ```
 
-Put one Exa key per line in `~/.codex/hybrid/exa.keys`. If the server or key file is absent, Exa is
-disabled and the core router still works. `EXA_MCP_ENTRY` and `EXA_KEYS_FILE` select alternate
-locations.
+Codex Hybrid does not install, patch, configure, remove, or add instructions for Exa. See the
+official [`exa-mcp-server`](https://github.com/exa-labs/exa-mcp-server) documentation for API-key
+and self-hosted options.
 
 ## Activation
 
@@ -167,20 +161,21 @@ are intentionally discarded by the byte-exact restore.
 
 ## Architecture
 
-- `responses-protocol.mjs`: deep Compatibility Translation module for JSON, SSE, WebSocket events,
-  namespace tools, and `apply_patch`.
-- `model-routing.mjs`: transport-independent model decision and request preparation pipeline.
-- `provider-registry.mjs`: versioned registry validation, hot reload, routing, and credentials.
-- `vision-workflow.mjs`: task contexts, Luna calls, Vision Evidence, cache, and metrics.
-- `activation.mjs`: catalog, Activation Snapshot, launchctl, health, and restore transaction.
-- `router.mjs`, `vision-mcp.mjs`, `codex-hybrid.mjs`: thin transport and CLI adapters.
+- `src/provider/`: Provider Registry, credential resolution, model routing, and management.
+- `src/protocol/`: Compatibility Translation for Responses events and namespaced tools.
+- `src/vision/`: delegated Vision Evidence workflow and its MCP adapter.
+- `src/activation.mjs`: catalog, Activation Snapshot, launchctl, health, and restore transaction.
+- `src/router.mjs`: HTTP/WebSocket transport adapter.
+- `bin/codex-hybrid.mjs`: CLI adapter.
+- `scripts/install.mjs`: local installer and LaunchAgent generation.
+- `tests/`: tests organized against the same module seams.
 
-The repository's domain language is in `CONTEXT.md`; the provider-registry decision is recorded in
-`docs/adr/0001-provider-registry-routing.md`.
+The repository's domain language is in `docs/architecture/domain-language.md`; the Provider
+Registry decision is recorded in `docs/adr/0001-provider-registry-routing.md`.
 
 ## Privacy
 
-Generated registries, credentials, catalogs, runtime state, logs, backups, Exa keys, and local Codex
+Generated registries, credentials, catalogs, runtime state, logs, backups, and local Codex
 configuration are excluded from Git. Plaintext inline credentials are supported by explicit user
 choice. CLI list/status output never prints resolved credential values.
 
