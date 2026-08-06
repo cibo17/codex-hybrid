@@ -1,12 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { normalizeProviderToolProfile } from "../tools/profile.mjs";
 
 export const REGISTRY_VERSION = 1;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CREDENTIAL_TYPES = new Set(["inline", "env", "keychain", "none"]);
 const VISION_MODES = new Set(["delegated", "native"]);
+const SEARCH_MODES = new Set(["external", "native"]);
+const POOL_STRATEGIES = new Set(["fill_first"]);
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const CREDENTIAL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export function defaultRegistry() {
   return {
@@ -83,6 +87,39 @@ function validateCredential(value, providerId) {
   return credential;
 }
 
+function positiveDuration(value, fallback, label) {
+  const duration = Number(value ?? fallback);
+  if (!Number.isSafeInteger(duration) || duration < 1) throw new Error(`${label} must be a positive integer`);
+  return duration;
+}
+
+function validateCredentialPool(value, providerId) {
+  if (value === undefined) return null;
+  const pool = object(value, `provider ${providerId} credential_pool`);
+  const strategy = String(pool.strategy || "fill_first");
+  if (!POOL_STRATEGIES.has(strategy)) throw new Error(`provider ${providerId} credential_pool.strategy is invalid`);
+  if (!Array.isArray(pool.entries) || pool.entries.length === 0) {
+    throw new Error(`provider ${providerId} credential_pool.entries must not be empty`);
+  }
+  const ids = new Set();
+  const entries = pool.entries.map((rawEntry) => {
+    const entry = object(rawEntry, `provider ${providerId} credential_pool entry`);
+    const id = String(entry.id || "");
+    if (!CREDENTIAL_ID.test(id)) throw new Error(`provider ${providerId} credential_pool entry id is invalid`);
+    if (ids.has(id)) throw new Error(`provider ${providerId} credential_pool entry id is duplicated: ${id}`);
+    ids.add(id);
+    const credential = validateCredential(entry, providerId);
+    return { id, ...credential };
+  });
+  return {
+    strategy,
+    cooldown_ms: positiveDuration(pool.cooldown_ms, 300_000, `provider ${providerId} credential_pool.cooldown_ms`),
+    first_event_timeout_ms: positiveDuration(pool.first_event_timeout_ms, 20_000, `provider ${providerId} credential_pool.first_event_timeout_ms`),
+    idle_timeout_ms: positiveDuration(pool.idle_timeout_ms, 45_000, `provider ${providerId} credential_pool.idle_timeout_ms`),
+    entries,
+  };
+}
+
 function validateModel(value, providerId, slug) {
   const model = structuredClone(object(value, `model ${slug}`));
   if (!slug || typeof slug !== "string") throw new Error(`provider ${providerId} has an invalid model slug`);
@@ -95,13 +132,24 @@ function validateModel(value, providerId, slug) {
   if (!efforts.includes(defaultEffort)) throw new Error(`model ${slug} default reasoning effort is not supported`);
   const visionMode = model.vision_mode || "delegated";
   if (!VISION_MODES.has(visionMode)) throw new Error(`model ${slug} vision_mode is invalid`);
+  const searchMode = model.search_mode || "external";
+  if (!SEARCH_MODES.has(searchMode)) throw new Error(`model ${slug} search_mode is invalid`);
+  const toolProfile = normalizeProviderToolProfile(model.tool_protocol);
   return {
     display_name: String(model.display_name || `${slug} · ${providerId}`),
     description: String(model.description || `Responses model served by ${providerId}.`),
+    upstream_model: String(model.upstream_model || slug),
     context_window: contextWindow,
     reasoning_efforts: efforts,
     default_reasoning_effort: defaultEffort,
     vision_mode: visionMode,
+    search_mode: searchMode,
+    tool_protocol: {
+      namespaces: toolProfile.namespaces,
+      custom_tools: toolProfile.customTools,
+      deferred_tools: toolProfile.deferredTools,
+      tool_search: toolProfile.toolSearch,
+    },
   };
 }
 
@@ -125,6 +173,7 @@ export function validateRegistry(value) {
       name: String(provider.name || providerId),
       base_url: normalizedBaseUrl(provider.base_url, providerId),
       credential: validateCredential(provider.credential, providerId),
+      credential_pool: validateCredentialPool(provider.credential_pool, providerId),
       models,
     };
   }
@@ -141,6 +190,16 @@ export function publicRegistry(value) {
         type: provider.credential.type,
         ...(provider.credential.header ? { header: provider.credential.header } : {}),
       },
+      ...(provider.credential_pool ? {
+        credential_pool: {
+          ...provider.credential_pool,
+          entries: provider.credential_pool.entries.map((entry) => ({
+            id: entry.id,
+            type: entry.type,
+            ...(entry.header ? { header: entry.header } : {}),
+          })),
+        },
+      } : {}),
     };
   }
   return { version: registry.version, providers };

@@ -15,7 +15,7 @@ function workflow(tokenFile, fetch = async () => assert.fail("unexpected Luna ca
   });
 }
 
-test("delegated vision hides helper ordering behind one workflow interface", async (t) => {
+test("delegated vision returns an opaque context without owning tool encoding", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vision-workflow-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const tokenFile = path.join(directory, "vision.token");
@@ -26,9 +26,8 @@ test("delegated vision hides helper ordering behind one workflow interface", asy
     input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
   }, { visionMode: "delegated", headers: new Headers(), accountScope: "a", promptCacheKey: "p" });
   const tool = result.body.tools[0].tools[0];
-  const [boundContext] = tool.parameters.properties._hybrid_context_id.enum;
-  assert.match(boundContext, /^vision_ctx_/);
-  assert.equal(result.contextId, boundContext);
+  assert.equal(tool.parameters, undefined);
+  assert.match(result.contextId, /^vision_ctx_/);
 });
 
 test("native vision removes the Hybrid-only tool and preserves images", async (t) => {

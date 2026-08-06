@@ -6,7 +6,6 @@ import test from "node:test";
 import {
   HYBRID_VISION_NAMESPACE,
   VisionCache,
-  bindHybridVisionContext,
   imageDataUrlFromPath,
   latestUserHasDirectImage,
   replaceImagesForTextModel,
@@ -60,21 +59,28 @@ test("removes third-party reasoning but preserves official encrypted reasoning",
   assert.equal(body.input[1].id, "rs_01ee4cc07bff44f1016a70634e4c748194912e3a7434405c19");
 });
 
-test("binds an opaque capability only to the Hybrid vision tool", () => {
-  const body = bindHybridVisionContext({
-    tools: [
+test("restores plaintext agent payloads mislabeled as encrypted content", () => {
+  const officialCiphertext = "gAAAAABofficial_agent_ciphertext_without_spaces";
+  const body = sanitizeHistoryForOpenAI({
+    input: [
       {
-        type: "namespace",
-        name: HYBRID_VISION_NAMESPACE,
-        tools: [{ name: "analyze_image", parameters: { type: "object", properties: {}, required: [] } }],
+        type: "agent_message",
+        author: "/root",
+        recipient: "/root/child",
+        content: [
+          { type: "input_text", text: "Payload:\n" },
+          { type: "encrypted_content", encrypted_content: "请只回复：online" },
+        ],
       },
-      { type: "function", name: "keep_me", parameters: { type: "object", properties: {} } },
+      {
+        type: "agent_message",
+        content: [{ type: "encrypted_content", encrypted_content: officialCiphertext }],
+      },
     ],
-  }, "ctx_test");
-  const schema = body.tools[0].tools[0].parameters;
-  assert.deepEqual(schema.properties._hybrid_context_id.enum, ["ctx_test"]);
-  assert.deepEqual(schema.required, ["_hybrid_context_id"]);
-  assert.equal(body.tools[1].parameters.properties._hybrid_context_id, undefined);
+  });
+
+  assert.deepEqual(body.input[0].content[1], { type: "input_text", text: "请只回复：online" });
+  assert.deepEqual(body.input[1].content[0], { type: "encrypted_content", encrypted_content: officialCiphertext });
 });
 
 test("replaces direct and tool-output images with delegated text", async () => {

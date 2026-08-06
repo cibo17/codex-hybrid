@@ -14,7 +14,23 @@ const INSTALL_HOME = process.env.CODEX_HYBRID_INSTALL_HOME || os.homedir();
 const runtime = runtimeConfig(process.env, INSTALL_HOME);
 const DEST = runtime.root;
 const RUNTIME = runtime.nodeExecutable;
-const SOURCE_NODE = process.env.CODEX_HYBRID_NODE || process.execPath;
+function selectNode() {
+  const explicit = process.env.CODEX_HYBRID_NODE;
+  const candidates = explicit
+    ? [explicit]
+    : [process.execPath, "/opt/homebrew/bin/node", "/usr/local/bin/node"];
+  for (const candidate of candidates) {
+    try {
+      const resolved = fs.realpathSync(candidate);
+      fs.accessSync(resolved, fs.constants.X_OK);
+      if (!explicit && resolved.includes(`${path.sep}.hermes${path.sep}`)) continue;
+      return resolved;
+    } catch {}
+  }
+  throw new Error("No standalone Node.js runtime found; set CODEX_HYBRID_NODE=/absolute/path/to/node");
+}
+
+const SOURCE_NODE = selectNode();
 const BIN_DIR = path.join(INSTALL_HOME, ".local", "bin");
 const CLI = path.join(BIN_DIR, "codex-hybrid");
 const PLIST = runtime.launchAgentFile;

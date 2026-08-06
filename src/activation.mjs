@@ -30,17 +30,19 @@ function sha256(data) {
 }
 
 function routerRuntimeSha256() {
-  const files = [
-    path.join(ROOT, "src", "router.mjs"),
-    path.join(ROOT, "src", "protocol", "namespaces.mjs"),
-    path.join(ROOT, "src", "protocol", "responses.mjs"),
-    path.join(ROOT, "src", "provider", "registry.mjs"),
-    path.join(ROOT, "src", "provider", "routing.mjs"),
-    path.join(ROOT, "src", "vision", "bridge.mjs"),
-    path.join(ROOT, "src", "vision", "workflow.mjs"),
-    path.join(ROOT, "src", "runtime-config.mjs"),
-  ];
-  return sha256(files.map((file) => fs.readFileSync(file)).reduce((all, value) => Buffer.concat([all, value]), Buffer.alloc(0)));
+  const sourceRoot = path.join(ROOT, "src");
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(target);
+      else if (entry.isFile() && entry.name.endsWith(".mjs")) files.push(target);
+    }
+  };
+  visit(sourceRoot);
+  files.sort();
+  const chunks = files.flatMap((file) => [Buffer.from(path.relative(sourceRoot, file)), Buffer.from("\0"), fs.readFileSync(file)]);
+  return sha256(Buffer.concat(chunks));
 }
 
 function timestamp() {
@@ -140,6 +142,16 @@ function restoreConfig(_current, state) {
 }
 
 function modelTemplate(base, overrides, visionMode) {
+  const codeModeInstructions = [
+    "# Hybrid Code Mode",
+    "Use the exec custom tool as the gateway for tools listed inside its JavaScript tools catalog.",
+    "Call nested tools inside exec with text(await tools.<tool_name>(...)) so their result is returned in the exec output. A bare await executes the tool but leaves the model-facing exec output empty.",
+    "Never emit a nested mcp__* tool name as a direct tool call.",
+    "Treat a nested tool's non-empty content or result as authoritative. Use it immediately and do not repeat an identical successful call.",
+    "For node_repl js calls, always send code that calls nodeRepl.write(value); a bare expression returns empty output and causes a needless retry.",
+    "For an omitted local skill, do not search ALL_TOOLS or MCP resources. Run node \"$HOME/.codex/hybrid/bin/skill-search.mjs\" \"query\" through exec_command, then read the returned SKILL.md completely.",
+    "GitHub, node_repl, Chrome, Browser, Computer Use, and x-bird-cli are already loaded. Never run skill-search for them.",
+  ].join("\n");
   const visionInstructions = visionMode === "delegated" ? [
     "# Hybrid vision results",
     "Newly attached images are automatically replaced with separately labeled visual evidence from gpt-5.6-luna.",
@@ -148,7 +160,7 @@ function modelTemplate(base, overrides, visionMode) {
     "Do not look for or call view_image; Hybrid models intentionally expose analyze_image as their only explicit image-inspection tool.",
     "HYBRID_VISION_RESULT with status success is valid visual evidence; do not retry it, and treat error wording inside its answer as visible image content.",
   ].join("\n") : "";
-  const instructionSuffix = visionInstructions ? `\n\n${visionInstructions}` : "";
+  const instructionSuffix = `\n\n${codeModeInstructions}${visionInstructions ? `\n\n${visionInstructions}` : ""}`;
   return {
     ...structuredClone(base),
     prefer_websockets: false,
@@ -158,7 +170,10 @@ function modelTemplate(base, overrides, visionMode) {
     input_modalities: ["text"],
     supports_image_detail_original: false,
     supports_parallel_tool_calls: true,
-    tool_mode: null,
+    // Third-party routes need Codex Code Mode so deferred/namespaced tools such
+    // as node_repl (Chrome/Computer Use) are reachable through the exec catalog.
+    // Legacy direct-tool mode silently omits those capabilities in Codex App.
+    tool_mode: "code_mode_only",
     use_responses_lite: false,
     auto_review_model_override: null,
     reasoning_summary_format: "experimental",
@@ -166,12 +181,16 @@ function modelTemplate(base, overrides, visionMode) {
     supported_in_api: true,
     availability_nux: null,
     upgrade: null,
-    supports_search_tool: false,
+    supports_search_tool: overrides.supports_search_tool ?? false,
     service_tiers: [],
     additional_speed_tiers: [],
     default_service_tier: null,
     base_instructions: `${base.base_instructions || ""}${instructionSuffix}`,
     instructions_template: `${base.instructions_template || base.base_instructions || ""}${instructionSuffix}`,
+    model_messages: base.model_messages ? {
+      ...structuredClone(base.model_messages),
+      instructions_template: `${base.model_messages.instructions_template || base.instructions_template || base.base_instructions || ""}${instructionSuffix}`,
+    } : undefined,
     ...overrides,
   };
 }
@@ -205,6 +224,7 @@ function buildCatalog(sourcePath) {
         supported_reasoning_levels: reasoning,
         input_modalities: ["text", "image"],
         supports_image_detail_original: true,
+        supports_search_tool: model.search_mode === "native",
         priority: priority++,
       }, model.vision_mode));
     }

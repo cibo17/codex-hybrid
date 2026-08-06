@@ -68,8 +68,29 @@ function providerCommand(args) {
 function keyCommand(args) {
   const subcommand = args[0];
   const providerId = args[1];
-  if (!providerId || !["set", "remove"].includes(subcommand)) {
-    fail("usage: codex-hybrid key set <provider> [--api-key <key> | --env <name> | --keychain-service <service> --keychain-account <account> | --none] | key remove <provider>");
+  if (!providerId || !["list", "set", "add", "remove"].includes(subcommand)) {
+    fail("usage: codex-hybrid key list <provider> | key set <provider> [credential] | key add <provider> <id> [credential] | key remove <provider> [id]");
+  }
+  if (subcommand === "list") {
+    const provider = providerRegistryEditor.publicView().providers[providerId];
+    if (!provider) fail(`Responses Provider not found: ${providerId}`);
+    const entries = provider.credential_pool?.entries || [{ id: "default", ...provider.credential }];
+    process.stdout.write(`${JSON.stringify({ provider: providerId, strategy: provider.credential_pool?.strategy || "fill_first", entries }, null, 2)}\n`);
+    return;
+  }
+  if (subcommand === "add") {
+    const credentialId = args[2];
+    if (!credentialId) fail("key add requires <provider> <id>");
+    const credential = credentialFromOptions(optionMap(args.slice(3)), null);
+    if (!credential) fail("key add requires a credential option");
+    providerRegistryEditor.addCredential(providerId, credentialId, credential);
+    process.stdout.write(`Credential ${credentialId} added to ${providerId}.\n`);
+    return;
+  }
+  if (subcommand === "remove" && args[2]) {
+    providerRegistryEditor.removeCredential(providerId, args[2]);
+    process.stdout.write(`Credential ${args[2]} removed from ${providerId}.\n`);
+    return;
   }
   const credential = subcommand === "remove"
     ? { type: "none" }
@@ -90,10 +111,18 @@ function modelCommand(args) {
     providerRegistryEditor.addModel(providerId, slug, {
       display_name: typeof options["display-name"] === "string" ? options["display-name"] : undefined,
       description: typeof options.description === "string" ? options.description : undefined,
+      upstream_model: typeof options["upstream-model"] === "string" ? options["upstream-model"] : undefined,
       context_window: options["context-window"] ? Number(options["context-window"]) : undefined,
       reasoning_efforts: typeof options.efforts === "string" ? options.efforts.split(",").filter(Boolean) : undefined,
       default_reasoning_effort: typeof options["default-effort"] === "string" ? options["default-effort"] : undefined,
       vision_mode: typeof options.vision === "string" ? options.vision : "delegated",
+      search_mode: typeof options.search === "string" ? options.search : "external",
+      tool_protocol: {
+        namespaces: typeof options.namespaces === "string" ? options.namespaces : "flatten",
+        custom_tools: typeof options["custom-tools"] === "string" ? options["custom-tools"] : "function",
+        deferred_tools: typeof options["deferred-tools"] === "string" ? options["deferred-tools"] : "code_mode",
+        tool_search: typeof options["tool-search"] === "string" ? options["tool-search"] : "passthrough",
+      },
     });
     hybridActivation.refreshCatalogIfActive();
     process.stdout.write(`Model Route ${slug} added to ${providerId}.\n`);

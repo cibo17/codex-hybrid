@@ -53,6 +53,43 @@ export class ProviderRegistryEditor {
     return this.update((value) => {
       if (!value.providers[id]) throw new Error(`Responses Provider not found: ${id}`);
       value.providers[id].credential = credential;
+      delete value.providers[id].credential_pool;
+    });
+  }
+
+  addCredential(id, credentialId, credential) {
+    return this.update((value) => {
+      const provider = value.providers[id];
+      if (!provider) throw new Error(`Responses Provider not found: ${id}`);
+      if (!provider.credential_pool) {
+        const entries = [];
+        if (provider.credential && provider.credential.type !== "none") {
+          entries.push({ id: "default", ...provider.credential });
+        }
+        provider.credential_pool = { strategy: "fill_first", entries };
+        provider.credential = { type: "none" };
+      }
+      if (provider.credential_pool.entries.some((entry) => entry.id === credentialId)) {
+        throw new Error(`Credential already exists for ${id}: ${credentialId}`);
+      }
+      provider.credential_pool.entries.push({ id: credentialId, ...credential });
+    });
+  }
+
+  removeCredential(id, credentialId) {
+    return this.update((value) => {
+      const provider = value.providers[id];
+      if (!provider) throw new Error(`Responses Provider not found: ${id}`);
+      if (!provider.credential_pool) throw new Error(`Credential pool not found for ${id}`);
+      const before = provider.credential_pool.entries.length;
+      provider.credential_pool.entries = provider.credential_pool.entries.filter((entry) => entry.id !== credentialId);
+      if (provider.credential_pool.entries.length === before) {
+        throw new Error(`Credential not found for ${id}: ${credentialId}`);
+      }
+      if (provider.credential_pool.entries.length === 0) {
+        delete provider.credential_pool;
+        provider.credential = { type: "none" };
+      }
     });
   }
 

@@ -13,4 +13,5 @@ models.hybrid.json
 vision.token
 exa.keys
 postflight.txt
+diagnostics/
 .DS_Store

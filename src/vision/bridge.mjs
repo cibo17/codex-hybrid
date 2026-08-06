@@ -45,50 +45,25 @@ function hasVerifiableOpenAiReasoning(item) {
   return /^rs_[0-9a-f]{32,}$/i.test(String(item.id || "")) && encrypted.length > 64 && !/\s/.test(encrypted);
 }
 
+function restorePlaintextAgentMessage(item) {
+  if (item?.type !== "agent_message" || !Array.isArray(item.content)) return item;
+  let changed = false;
+  const content = item.content.map((part) => {
+    if (part?.type !== "encrypted_content" || typeof part.encrypted_content !== "string") return part;
+    if (/^gAAAAA[^\s]+$/.test(part.encrypted_content)) return part;
+    changed = true;
+    return { type: "input_text", text: part.encrypted_content };
+  });
+  return changed ? { ...item, content } : item;
+}
+
 export function sanitizeHistoryForOpenAI(originalBody) {
   const body = structuredClone(originalBody);
-  if (Array.isArray(body?.input)) body.input = body.input.filter((item) => hasVerifiableOpenAiReasoning(item));
-  return body;
-}
-
-function bindVisionTool(tool, contextId) {
-  if (!tool || typeof tool !== "object") return;
-  if (tool.type === "namespace") {
-    if (tool.name === HYBRID_VISION_NAMESPACE && Array.isArray(tool.tools)) {
-      for (const child of tool.tools) {
-        if (child?.name === HYBRID_VISION_TOOL) bindVisionTool(child, contextId);
-      }
-    }
-    return;
+  if (Array.isArray(body?.input)) {
+    body.input = body.input
+      .filter((item) => hasVerifiableOpenAiReasoning(item))
+      .map(restorePlaintextAgentMessage);
   }
-  if (!DIRECT_TOOL_NAMES.has(tool.name)) return;
-  const schemaKey = tool.parameters ? "parameters" : tool.input_schema ? "input_schema" : "parameters";
-  const schema = structuredClone(tool[schemaKey] || { type: "object", properties: {} });
-  schema.properties = { ...(schema.properties || {}) };
-  schema.properties._hybrid_context_id = {
-    type: "string",
-    enum: [contextId],
-    description: "Internal Hybrid vision capability. Preserve this exact value when calling the tool.",
-  };
-  schema.required = [...new Set([...(schema.required || []), "_hybrid_context_id"])];
-  tool[schemaKey] = schema;
-}
-
-function bindToolCollections(value, contextId) {
-  if (!value || typeof value !== "object") return;
-  if (Array.isArray(value)) {
-    for (const child of value) bindToolCollections(child, contextId);
-    return;
-  }
-  if (Array.isArray(value.tools)) {
-    for (const tool of value.tools) bindVisionTool(tool, contextId);
-  }
-  for (const child of Object.values(value)) bindToolCollections(child, contextId);
-}
-
-export function bindHybridVisionContext(originalBody, contextId) {
-  const body = structuredClone(originalBody);
-  bindToolCollections(body, contextId);
   return body;
 }
 

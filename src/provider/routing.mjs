@@ -1,43 +1,15 @@
-import { resolveCredential } from "./registry.mjs";
-import { adaptRequestForProvider } from "../protocol/responses.mjs";
+import { ProviderToolCodec } from "../tools/codec.mjs";
 
 export class ModelRoutingPipeline {
-  constructor({ registry, visionWorkflow, credentialResolver = resolveCredential }) {
+  constructor({ registry, visionWorkflow, toolCodec = new ProviderToolCodec(), collaborationBridge = null }) {
     this.registry = registry;
     this.visionWorkflow = visionWorkflow;
-    this.credentialResolver = credentialResolver;
+    this.toolCodec = toolCodec;
+    this.collaborationBridge = collaborationBridge;
   }
 
   route(model) {
     return typeof model === "string" ? this.registry.route(model) : null;
-  }
-
-  credential(route) {
-    if (!route) return "";
-    return this.credentialResolver(route.provider.credential);
-  }
-
-  credentialAvailable(route) {
-    return !route || route.provider.credential.type === "none" || Boolean(this.credential(route));
-  }
-
-  allCredentialsAvailable() {
-    const registry = this.registry.reload();
-    return Object.values(registry.providers).every((provider) => this.credentialAvailable({ provider }));
-  }
-
-  providerHeaders(route) {
-    const credential = this.credential(route);
-    if (route.provider.credential.type !== "none" && !credential) {
-      throw new Error(`credential is unavailable for Responses Provider ${route.provider.id}`);
-    }
-    const headers = { "content-type": "application/json" };
-    if (credential) {
-      const name = route.provider.credential.header || "authorization";
-      const prefix = route.provider.credential.prefix ?? "Bearer ";
-      headers[name] = `${prefix}${credential}`;
-    }
-    return headers;
   }
 
   async prepare(body, {
@@ -46,7 +18,6 @@ export class ModelRoutingPipeline {
     accountScope,
     promptCacheKey,
     contextId = null,
-    namespaceBridge = null,
   }) {
     const route = this.route(body?.model);
     if (!route) {
@@ -55,14 +26,16 @@ export class ModelRoutingPipeline {
         route: null,
         body: body ? this.visionWorkflow.prepareOfficialBody(body) : body,
         historyBody: body,
-        namespaceBridge: null,
+        toolTurn: null,
         contextId: null,
       };
     }
-    if (!this.credentialAvailable(route)) {
-      throw new Error(`credential is unavailable for Responses Provider ${route.provider.id}`);
-    }
-    const vision = await this.visionWorkflow.prepareProviderBody(body, {
+    const portableBody = this.collaborationBridge
+      ? await this.collaborationBridge.prepareProviderBody(body, {
+        resolveEncrypted: (item) => this.visionWorkflow.decodeAgentPayload(item, authHeaders),
+      })
+      : body;
+    const vision = await this.visionWorkflow.prepareProviderBody(portableBody, {
       visionMode: route.model.vision_mode,
       headers: authHeaders,
       accountScope,
@@ -70,13 +43,18 @@ export class ModelRoutingPipeline {
       contextId,
       transport,
     });
-    const protocol = adaptRequestForProvider(vision.body, namespaceBridge);
+    const toolTurn = this.toolCodec.prepare(vision.body, {
+      profile: route.model.tool_protocol,
+      nativeSearch: route.model.search_mode === "native",
+      visionContextId: vision.contextId,
+    });
+    toolTurn.upstreamBody.model = route.model.upstream_model;
     return {
       kind: "provider",
       route,
-      body: protocol.body,
+      body: toolTurn.upstreamBody,
       historyBody: vision.body,
-      namespaceBridge: protocol.bridge,
+      toolTurn,
       contextId: vision.contextId,
     };
   }

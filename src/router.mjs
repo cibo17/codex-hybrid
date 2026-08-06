@@ -13,15 +13,12 @@ import {
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { NamespaceBridge, adaptNamespacesForProvider } from "./protocol/namespaces.mjs";
 import { ModelRoutingPipeline } from "./provider/routing.mjs";
 import { ProviderRegistry } from "./provider/registry.mjs";
-import {
-  ResponsesEventAdapter,
-  ResponsesSseAdapter,
-  readResponsesSse,
-  transformResponseObject,
-} from "./protocol/responses.mjs";
+import { ProviderTransport } from "./provider/transport.mjs";
+import { ResponsesSseAdapter, readResponsesSse } from "./protocol/sse.mjs";
+import { captureProviderRequest } from "./tools/diagnostics.mjs";
+import { CollaborationHistoryBridge } from "./tools/collaboration-history.mjs";
 import { VisionEvidenceWorkflow } from "./vision/workflow.mjs";
 import { runtimeConfig } from "./runtime-config.mjs";
 
@@ -60,7 +57,13 @@ const visionWorkflow = new VisionEvidenceWorkflow({
   dispatcher: HTTP_DISPATCHER,
   log,
 });
-const routingPipeline = new ModelRoutingPipeline({ registry: providerRegistry, visionWorkflow });
+const collaborationBridge = new CollaborationHistoryBridge();
+const routingPipeline = new ModelRoutingPipeline({ registry: providerRegistry, visionWorkflow, collaborationBridge });
+const providerTransport = new ProviderTransport({
+  fetch: undiciFetch,
+  dispatcher: HTTP_DISPATCHER,
+  log,
+});
 
 function routeForModel(model) {
   return routingPipeline.route(model);
@@ -99,9 +102,6 @@ function copyRequestHeaders(request, route = null) {
     for (const value of values) if (value !== undefined) headers.append(name, value);
   }
   headers.set("content-type", "application/json");
-  if (route) {
-    for (const [name, value] of Object.entries(routingPipeline.providerHeaders(route))) headers.set(name, value);
-  }
   return headers;
 }
 
@@ -125,10 +125,10 @@ async function handleVisionAnalyze(request, response) {
   try {
     const rawBody = await readBody(request);
     const args = JSON.parse(rawBody.toString("utf8"));
-    const token = String(request.headers.authorization || "").replace(/^Bearer\\s+/i, "");
+    const token = String(request.headers.authorization || "").replace(/^Bearer\s+/i, "");
     const analysis = await visionWorkflow.analyzePath({
       token,
-      path: args.path,
+      path: args.path ?? args.image_path,
       prompt: args.prompt,
       detail: args.detail || "high",
       contextId: args._hybrid_context_id,
@@ -162,6 +162,12 @@ function copyResponseHeaders(upstream, response) {
     ) continue;
     response.setHeader(name, value);
   }
+}
+
+function handleProviderStreamError(error, response, providerId) {
+  log(`Responses Provider ${providerId} response stream error: ${error?.message || String(error)}`);
+  if (!response.headersSent) response.writeHead(502, { "content-type": "application/json" });
+  if (!response.writableEnded) response.destroy(error);
 }
 
 function upstreamPath(requestUrl) {
@@ -201,16 +207,21 @@ async function handleProxy(request, response) {
   }
   const route = prepared.route;
   const body = prepared.body;
-  const namespaceBridge = prepared.namespaceBridge;
-  const base = route ? route.provider.base_url : OPENAI_BASE;
-  const target = `${base}${upstreamPath(request.url)}`;
-  const upstream = await undiciFetch(target, {
+  const toolTurn = prepared.toolTurn;
+  const requestPath = upstreamPath(request.url);
+  const upstreamInit = {
     method: request.method,
     headers: copyRequestHeaders(request, route),
     body: decodedBody.length ? JSON.stringify(body) : undefined,
     redirect: "manual",
-    dispatcher: HTTP_DISPATCHER,
-  });
+  };
+  let upstream;
+  if (route) {
+    captureProviderRequest(runtime.root, route, body, { transport: "http" });
+    upstream = await providerTransport.request(route, requestPath, upstreamInit);
+  } else {
+    upstream = await undiciFetch(`${OPENAI_BASE}${requestPath}`, { ...upstreamInit, dispatcher: HTTP_DISPATCHER });
+  }
 
   response.statusCode = upstream.status;
   copyResponseHeaders(upstream, response);
@@ -222,7 +233,10 @@ async function handleProxy(request, response) {
   const contentType = upstream.headers.get("content-type") || "";
   const readable = Readable.fromWeb(upstream.body);
   if (route && contentType.includes("text/event-stream")) {
-    readable.pipe(new ResponsesSseAdapter(namespaceBridge)).pipe(response);
+    const adapter = new ResponsesSseAdapter(toolTurn, { onEvent: (event) => collaborationBridge.observe(event) });
+    readable.on("error", (error) => handleProviderStreamError(error, response, route.provider.id));
+    adapter.on("error", (error) => handleProviderStreamError(error, response, route.provider.id));
+    readable.pipe(adapter).pipe(response);
     return;
   }
   if (route && contentType.includes("application/json")) {
@@ -230,7 +244,9 @@ async function handleProxy(request, response) {
     for await (const chunk of readable) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString("utf8");
     try {
-      response.end(JSON.stringify(transformResponseObject(JSON.parse(text), namespaceBridge)));
+      const adapted = toolTurn.adaptResponse(JSON.parse(text));
+      collaborationBridge.observe(adapted);
+      response.end(JSON.stringify(adapted));
     } catch {
       response.end(text);
     }
@@ -243,7 +259,7 @@ const server = http.createServer(async (request, response) => {
   if (request.url === "/health") {
     const visionHealth = visionWorkflow.health();
     const registryStatus = providerRegistry.status();
-    const credentialsAvailable = routingPipeline.allCredentialsAvailable();
+    const credentialsAvailable = providerTransport.allCredentialsAvailable(providerRegistry);
     response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     response.end(JSON.stringify({
       ok: true,
@@ -307,6 +323,7 @@ function createOpenAiWebSocketSession(client, request) {
       pending.length = 0;
     });
     upstream.on("message", (data, isBinary) => {
+      try { collaborationBridge.observe(JSON.parse(data.toString("utf8"))); } catch {}
       if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
     });
     upstream.on("close", (code, reason) => {
@@ -385,7 +402,6 @@ function createResponsesProviderSession(client, request, providerId) {
   const state = {
     fullInput: [],
     lastOutput: [],
-    namespaceBridge: new NamespaceBridge(),
     visionContextId: null,
     queue: Promise.resolve(),
   };
@@ -394,7 +410,6 @@ function createResponsesProviderSession(client, request, providerId) {
     if (message.type !== "response.create") throw new Error(`unsupported websocket message: ${message.type}`);
     if (route.provider.id !== providerId) throw new Error("Responses Provider session route mismatch");
     if (message.generate === false) {
-      state.namespaceBridge = adaptNamespacesForProvider(message, state.namespaceBridge).bridge;
       state.fullInput = Array.isArray(message.input) ? structuredClone(message.input) : [];
       state.lastOutput = [];
       const response = warmupResponse(message.model);
@@ -416,28 +431,28 @@ function createResponsesProviderSession(client, request, providerId) {
       authHeaders: copyRequestHeaders(request),
       accountScope: request.headers["chatgpt-account-id"],
       contextId: state.visionContextId,
-      namespaceBridge: state.namespaceBridge,
     });
     const adaptedBody = prepared.body;
     state.visionContextId = prepared.contextId;
-    state.namespaceBridge = prepared.namespaceBridge;
     state.fullInput = Array.isArray(prepared.historyBody?.input) ? structuredClone(prepared.historyBody.input) : [];
     state.lastOutput = [];
 
-    const upstream = await undiciFetch(`${route.provider.base_url}/responses`, {
+    captureProviderRequest(runtime.root, route, adaptedBody, { transport: "websocket" });
+
+    const upstream = await providerTransport.request(route, "/responses", {
       method: "POST",
-      headers: routingPipeline.providerHeaders(route),
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(adaptedBody),
-      dispatcher: HTTP_DISPATCHER,
     });
     if (!upstream.ok) {
       const errorText = await upstream.text();
       throw new Error(`Responses Provider ${providerId} received HTTP ${upstream.status}: ${errorText.slice(0, 300)}`);
     }
 
-    const adapter = new ResponsesEventAdapter(state.namespaceBridge);
+    const adapter = prepared.toolTurn.createEventReducer();
     await readResponsesSse(upstream, async ({ eventName, data }) => {
       for (const event of adapter.adapt(eventName, data)) {
+        collaborationBridge.observe(event.data);
         if (event.eventName === "response.completed" && Array.isArray(event.data.response?.output)) {
           state.lastOutput = structuredClone(event.data.response.output);
         }

@@ -1,0 +1,235 @@
+import { ExposurePlanner, directMcpTarget } from "./exposure.mjs";
+import { ToolInventory } from "./inventory.mjs";
+import { normalizeProviderToolProfile } from "./profile.mjs";
+import { compactSkillsCatalog } from "./skills-catalog.mjs";
+import { VisionCapability } from "./vision-capability.mjs";
+
+function customInputFromArguments(argumentsText, argumentKey = "input") {
+  if (typeof argumentsText !== "string") return "";
+  try {
+    const value = JSON.parse(argumentsText);
+    if (typeof value?.[argumentKey] === "string") return value[argumentKey];
+    if (typeof value?.input === "string") return value.input;
+  } catch {
+    // Some compatible servers return raw custom-tool input in arguments.
+  }
+  return argumentsText;
+}
+
+function portableCustomTool(tool, customTools) {
+  if (tool?.type !== "custom" || typeof tool?.name !== "string") return tool;
+  const argumentKey = tool.name === "apply_patch" ? "patch" : "input";
+  customTools.set(tool.name, argumentKey);
+  return {
+    type: "function",
+    name: tool.name,
+    description: tool.description || `Run the ${tool.name} custom tool.`,
+    parameters: {
+      type: "object",
+      properties: {
+        [argumentKey]: {
+          type: "string",
+          description: tool.name === "apply_patch"
+            ? "The complete apply_patch patch text."
+            : "The complete raw input for this custom tool.",
+        },
+      },
+      required: [argumentKey],
+      additionalProperties: false,
+    },
+  };
+}
+
+function adaptInputItem(item, customTools) {
+  if (!item || typeof item !== "object") return item;
+  if (item.type === "custom_tool_call" && customTools.has(item.name)) {
+    const argumentKey = customTools.get(item.name);
+    const result = { ...item, type: "function_call", arguments: JSON.stringify({ [argumentKey]: item.input || "" }) };
+    delete result.input;
+    return result;
+  }
+  if (item.type === "custom_tool_call_output") return { ...item, type: "function_call_output" };
+  return item;
+}
+
+function stripCodexExtensions(body) {
+  for (const key of [
+    "background",
+    "client_metadata",
+    "conversation",
+    "include",
+    "metadata",
+    "previous_response_id",
+    "prompt",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "service_tier",
+    "store",
+    "stream_options",
+  ]) delete body[key];
+  if (body.text && typeof body.text === "object") {
+    const text = { ...body.text };
+    delete text.verbosity;
+    if (Object.keys(text).length === 0) delete body.text;
+    else body.text = text;
+  }
+}
+
+function restoreNamespace(item, aliases) {
+  if (!item || typeof item !== "object") return item;
+  if (["function_call", "tool_search_call"].includes(item.type) && typeof item.name === "string" && !item.namespace) {
+    const target = aliases.targetFor(item.name) || directMcpTarget(item.name);
+    if (target) return { ...item, name: target.name, namespace: target.namespace };
+  }
+  return item;
+}
+
+function transformOutputItem(item, state) {
+  if (!item || typeof item !== "object") return item;
+  let restored = restoreNamespace(structuredClone(item), state.aliases);
+  restored = state.vision.decorateCall(restored);
+  const argumentKey = !restored.namespace ? state.customTools.get(restored.name) : undefined;
+  if (restored.type === "function_call" && argumentKey) {
+    const { arguments: argumentsText, ...rest } = restored;
+    let input = customInputFromArguments(argumentsText, argumentKey);
+    if (restored.name === "exec") input = state.vision.bindExecSource(input);
+    return { ...rest, type: "custom_tool_call", input };
+  }
+  return restored;
+}
+
+function transformResponse(value, state) {
+  if (!value || typeof value !== "object") return value;
+  const transformed = { ...value };
+  if (Array.isArray(transformed.output)) transformed.output = transformed.output.map((item) => transformOutputItem(item, state));
+  if (transformed.response && typeof transformed.response === "object") {
+    transformed.response = transformResponse(transformed.response, state);
+  }
+  if (transformed.item && typeof transformed.item === "object") transformed.item = transformOutputItem(transformed.item, state);
+  return transformed;
+}
+
+class ToolCallReducer {
+  constructor(state) {
+    this.state = state;
+    this.customToolKeys = new Map();
+    this.customNames = new Map();
+    this.argumentBuffers = new Map();
+    this.visionToolKeys = new Set();
+  }
+
+  keyFor(data) {
+    return String(data.item_id ?? data.call_id ?? data.id ?? data.output_index ?? "unknown");
+  }
+
+  adapt(eventName, originalData) {
+    if (eventName === "response.output_item.added") {
+      const originalItem = originalData?.item;
+      const key = this.keyFor({ ...originalData, ...originalItem });
+      if (this.state.vision.isCall(originalItem)) this.visionToolKeys.add(key);
+      if (originalItem?.type === "function_call" && this.state.customTools.has(originalItem.name)) {
+        this.customToolKeys.set(key, this.state.customTools.get(originalItem.name));
+        this.customNames.set(key, originalItem.name);
+      }
+    }
+    let data = transformResponse(originalData, this.state);
+
+    if (eventName === "response.function_call_arguments.delta") {
+      const key = this.keyFor(data);
+      if (this.visionToolKeys.has(key) || this.customToolKeys.has(key)) {
+        this.argumentBuffers.set(key, (this.argumentBuffers.get(key) || "") + (data.delta || ""));
+        return [];
+      }
+    }
+
+    if (eventName === "response.function_call_arguments.done") {
+      const key = this.keyFor(data);
+      if (this.visionToolKeys.has(key) && this.state.vision.active) {
+        data = { ...data, arguments: this.state.vision.bindArguments(data.arguments || this.argumentBuffers.get(key) || "{}") };
+        this.argumentBuffers.delete(key);
+        this.visionToolKeys.delete(key);
+        return [
+          {
+            eventName: "response.function_call_arguments.delta",
+            data: { ...data, type: "response.function_call_arguments.delta", delta: data.arguments, arguments: undefined },
+          },
+          { eventName, data },
+        ];
+      }
+      if (this.customToolKeys.has(key)) {
+        let input = customInputFromArguments(
+          data.arguments || this.argumentBuffers.get(key) || "",
+          this.customToolKeys.get(key),
+        );
+        const customName = this.customNameForKey(key);
+        if (customName === "exec") input = this.state.vision.bindExecSource(input);
+        const common = { ...data };
+        delete common.arguments;
+        delete common.delta;
+        this.argumentBuffers.delete(key);
+        this.customToolKeys.delete(key);
+        this.customNames.delete(key);
+        return [
+          { eventName: "response.custom_tool_call_input.delta", data: { ...common, type: "response.custom_tool_call_input.delta", delta: input } },
+          { eventName: "response.custom_tool_call_input.done", data: { ...common, type: "response.custom_tool_call_input.done", input } },
+        ];
+      }
+    }
+    return [{ eventName, data }];
+  }
+
+  customNameForKey(key) {
+    // The transformed output-item event already carries the name, but the done
+    // event often does not. Keep a separate reverse lookup without leaking it
+    // into the turn-wide codec state.
+    return this.customNames.get(key);
+  }
+}
+
+export class ProviderToolTurn {
+  #state;
+
+  constructor({ upstreamBody, aliases, customTools, vision }) {
+    this.upstreamBody = upstreamBody;
+    this.#state = Object.freeze({ aliases, customTools, vision });
+    Object.freeze(this);
+  }
+
+  adaptResponse(value) {
+    return transformResponse(value, this.#state);
+  }
+
+  createEventReducer() {
+    return new ToolCallReducer(this.#state);
+  }
+}
+
+export class ProviderToolCodec {
+  constructor({ planner = new ExposurePlanner() } = {}) {
+    this.planner = planner;
+  }
+
+  prepare(body, { profile: profileValue = {}, nativeSearch = false, visionContextId = null } = {}) {
+    const profile = normalizeProviderToolProfile(profileValue);
+    const vision = new VisionCapability(visionContextId);
+    const inventory = ToolInventory.from(vision.augmentBody(compactSkillsCatalog(body)));
+    const plan = this.planner.plan(inventory, { profile, nativeSearch });
+    const adapted = plan.body;
+    const customTools = new Map();
+    if (profile.customTools === "function" && Array.isArray(adapted.tools)) {
+      adapted.tools = adapted.tools.map((tool) => portableCustomTool(tool, customTools));
+      if (Array.isArray(adapted.input)) adapted.input = adapted.input.map((item) => adaptInputItem(item, customTools));
+      if (adapted.tool_choice?.type === "custom" && customTools.has(adapted.tool_choice.name)) {
+        adapted.tool_choice = { ...adapted.tool_choice, type: "function" };
+      }
+    }
+    stripCodexExtensions(adapted);
+    return new ProviderToolTurn({
+      upstreamBody: adapted,
+      aliases: plan.aliases,
+      customTools,
+      vision,
+    });
+  }
+}

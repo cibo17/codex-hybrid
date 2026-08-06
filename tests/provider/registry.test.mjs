@@ -17,6 +17,7 @@ test("default registry preserves the existing Ollama model routes", () => {
   const registry = validateRegistry(defaultRegistry());
   assert.equal(registry.routes.get("deepseek-v4-flash:0731"), "ollama-pro");
   assert.equal(registry.routes.get("glm-5.2"), "ollama-pro");
+  assert.equal(registry.providers["ollama-pro"].models["glm-5.2"].upstream_model, "glm-5.2");
 });
 
 test("accepts inline, environment, keychain, and no-auth credentials", () => {
@@ -38,6 +39,28 @@ test("public registry redacts inline credential values", () => {
   assert.deepEqual(publicRegistry(value).providers["ollama-pro"].credential, { type: "inline" });
 });
 
+test("validates and redacts fill-first credential pools", () => {
+  const value = defaultRegistry();
+  value.providers["ollama-pro"].credential_pool = {
+    strategy: "fill_first",
+    cooldown_ms: 10_000,
+    first_event_timeout_ms: 2_000,
+    idle_timeout_ms: 5_000,
+    entries: [
+      { id: "primary", type: "inline", api_key: "first" },
+      { id: "secondary", type: "env", name: "SECOND_KEY" },
+    ],
+  };
+  const provider = validateRegistry(value).providers["ollama-pro"];
+  assert.equal(provider.credential_pool.entries.length, 2);
+  assert.deepEqual(publicRegistry(value).providers["ollama-pro"].credential_pool.entries, [
+    { id: "primary", type: "inline" },
+    { id: "secondary", type: "env" },
+  ]);
+  value.providers["ollama-pro"].credential_pool.entries[1].id = "primary";
+  assert.throws(() => validateRegistry(value), /duplicated/);
+});
+
 test("requires globally unique model routes", () => {
   const value = defaultRegistry();
   value.providers.second = {
@@ -54,6 +77,32 @@ test("allows HTTP only for loopback providers", () => {
   assert.throws(() => validateRegistry(value), /HTTPS or loopback HTTP/);
   value.providers["ollama-pro"].base_url = "http://127.0.0.1:11434/v1";
   assert.equal(validateRegistry(value).providers["ollama-pro"].base_url, "http://127.0.0.1:11434/v1");
+});
+
+test("validates native and external search modes", () => {
+  const value = defaultRegistry();
+  value.providers["ollama-pro"].models["glm-5.2"].search_mode = "native";
+  assert.equal(validateRegistry(value).providers["ollama-pro"].models["glm-5.2"].search_mode, "native");
+  value.providers["ollama-pro"].models["glm-5.2"].search_mode = "unknown";
+  assert.throws(() => validateRegistry(value), /search_mode is invalid/);
+});
+
+test("normalizes and validates provider tool protocol capabilities", () => {
+  const value = defaultRegistry();
+  value.providers["ollama-pro"].models["glm-5.2"].tool_protocol = {
+    namespaces: "native",
+    custom_tools: "native",
+    deferred_tools: "expand",
+    tool_search: "disabled",
+  };
+  assert.deepEqual(validateRegistry(value).providers["ollama-pro"].models["glm-5.2"].tool_protocol, {
+    namespaces: "native",
+    custom_tools: "native",
+    deferred_tools: "expand",
+    tool_search: "disabled",
+  });
+  value.providers["ollama-pro"].models["glm-5.2"].tool_protocol.namespaces = "guess";
+  assert.throws(() => validateRegistry(value), /tool_protocol\.namespaces is invalid/);
 });
 
 test("resolves all credential sources without exposing policy to callers", () => {

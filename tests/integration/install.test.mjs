@@ -25,6 +25,8 @@ test("installer preserves the public layout in the private runtime", (t) => {
   assert.match(fs.readFileSync(plist, "utf8"), /src\/router\.mjs/);
   assert.equal(fs.existsSync(path.join(root, "router.mjs")), false);
   assert.equal(fs.existsSync(path.join(root, "src", "provider", "registry.mjs")), true);
+  assert.equal(fs.existsSync(path.join(root, "src", "tools", "codec.mjs")), true);
+  assert.equal(fs.existsSync(path.join(root, "src", "protocol", "responses.mjs")), false);
 
   const list = spawnSync(runtimeNode, [cli, "provider", "list"], {
     env: { ...process.env, CODEX_HYBRID_HOME: home, CODEX_HYBRID_PORT: "19127" },
