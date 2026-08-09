@@ -110,6 +110,47 @@ test("aliases are isolated per turn when a later direct function reuses an old s
   });
 });
 
+test("direct function names are portable upstream and restored on output", () => {
+  const invalidFunction = "1.invalid/function";
+  const invalidCustom = "_custom.tool";
+  const turn = new ProviderToolCodec().prepare({
+    tools: [
+      { type: "function", ...fn(invalidFunction) },
+      { type: "custom", name: invalidCustom, description: "custom" },
+    ],
+    input: [
+      { type: "function_call", name: invalidFunction, call_id: "f1", arguments: "{}" },
+      { type: "custom_tool_call", name: invalidCustom, call_id: "c1", input: "hello" },
+    ],
+    tool_choice: {
+      type: "allowed_tools",
+      mode: "auto",
+      tools: [
+        { type: "function", name: invalidFunction },
+        { type: "function", function: { name: invalidCustom } },
+      ],
+    },
+  });
+  const [functionTool, customTool] = turn.upstreamBody.tools;
+  for (const tool of [functionTool, customTool]) {
+    assert.match(tool.name, /^[A-Za-z][A-Za-z0-9_-]*$/);
+    assert.ok(tool.name.length <= 64);
+  }
+  assert.equal(turn.upstreamBody.input[0].name, functionTool.name);
+  assert.equal(turn.upstreamBody.input[1].name, customTool.name);
+  assert.equal(turn.upstreamBody.tool_choice.tools[0].name, functionTool.name);
+  assert.equal(turn.upstreamBody.tool_choice.tools[1].function.name, customTool.name);
+
+  const response = turn.adaptResponse({ output: [
+    { type: "function_call", name: functionTool.name, arguments: "{}" },
+    { type: "function_call", name: customTool.name, arguments: JSON.stringify({ input: "world" }) },
+  ] });
+  assert.deepEqual(response.output, [
+    { type: "function_call", name: invalidFunction, arguments: "{}" },
+    { type: "custom_tool_call", name: invalidCustom, input: "world" },
+  ]);
+});
+
 test("HTTP object and streamed completion use the same turn codec", () => {
   const turn = new ProviderToolCodec().prepare({
     tools: [{ type: "namespace", name: "mcp__node_repl", tools: [fn("js")] }],
@@ -200,4 +241,26 @@ test("native search removes Exa but keeps provider web_search", () => {
     ],
   }, { nativeSearch: true });
   assert.deepEqual(turn.upstreamBody.tools, [{ type: "web_search" }, { type: "function", name: "exec" }]);
+});
+
+test("external search removes provider web_search but keeps Exa", () => {
+  const turn = new ProviderToolCodec().prepare({
+    tools: [
+      { type: "web_search" },
+      { type: "web_search_preview" },
+      { type: "namespace", name: "mcp__exa", tools: [fn("web_search_exa")] },
+      { type: "function", name: "exec" },
+    ],
+    input: [
+      { type: "web_search_call", id: "ws1", status: "completed" },
+      { role: "user", content: "hello" },
+    ],
+    tool_choice: { type: "web_search" },
+  });
+  assert.deepEqual(turn.upstreamBody.tools.map((tool) => [tool.type, tool.name]), [
+    ["function", "exec"],
+    ["function", "mcp__exa__web_search_exa"],
+  ]);
+  assert.equal(turn.upstreamBody.input.some((item) => item.type === "web_search_call"), false);
+  assert.equal(turn.upstreamBody.tool_choice, "auto");
 });

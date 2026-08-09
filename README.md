@@ -1,10 +1,11 @@
 # Codex Hybrid
 
-Codex Hybrid adds any OpenAI Responses-compatible model backend to Codex App while preserving the
-existing ChatGPT login, official models, saved tasks, and `model_provider = "openai"`.
+Codex Hybrid adds OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages model backends
+to Codex App while preserving the existing ChatGPT login, official models, saved tasks, and
+`model_provider = "openai"`.
 
 - Unclaimed model names continue through the unchanged ChatGPT Official Path.
-- Configured Model Routes use their Responses Provider.
+- Configured Model Routes use their selected third-party Provider and upstream API protocol.
 - HTTP and Codex App WebSocket requests share one routing and Compatibility Translation pipeline.
 - `codex-hybrid on` enables the router and generated model catalog.
 - `codex-hybrid off` restores the exact pre-Hybrid Codex configuration.
@@ -12,15 +13,15 @@ existing ChatGPT login, official models, saved tasks, and `model_provider = "ope
 This is an experimental macOS integration for the current Codex App/CLI protocol. Codex
 implementation details may change in future releases.
 
-## Responses Providers
+## Model Providers
 
 The Provider Registry lives at `~/.codex/hybrid/providers.json`. It hot-reloads after direct edits;
 an invalid edit keeps the last-known-good registry active and is reported by `/health` and
 `codex-hybrid status`.
 
-Every provider needs an HTTP endpoint implementing `POST /responses` with JSON or SSE responses.
-The upstream does not need WebSocket support: Codex Hybrid adapts the App's WebSocket transport to
-HTTP Responses requests locally.
+Providers may implement OpenAI Responses (`POST /responses`), OpenAI Chat Completions
+(`POST /chat/completions`), or Anthropic Messages (`POST /messages`). The upstream does not need
+WebSocket support: Codex Hybrid adapts the App's WebSocket transport to HTTP locally.
 
 The default registry preserves the original Ollama Pro routes:
 
@@ -51,10 +52,13 @@ sent to a third party.
           "display_name": "Example Coder",
           "description": "Coding model served by Example Responses.",
           "upstream_model": "provider-model-name",
+          "api_protocol": "responses",
           "context_window": 262144,
           "reasoning_efforts": ["low", "high"],
           "default_reasoning_effort": "high",
           "vision_mode": "delegated",
+          "vision_max_images_per_turn": 8,
+          "vision_failure_policy": "fail_request",
           "search_mode": "external",
           "tool_protocol": {
             "namespaces": "flatten",
@@ -110,10 +114,13 @@ codex-hybrid model list
 codex-hybrid model add example example-coder \
   --display-name "Example Coder" \
   --upstream-model provider-model-name \
+  --api-protocol responses \
   --context-window 262144 \
   --efforts low,high \
   --default-effort high \
   --vision delegated \
+  --vision-max-images 8 \
+  --vision-failure-policy fail_request \
   --search external \
   --namespaces flatten \
   --custom-tools function \
@@ -130,7 +137,14 @@ refresh the model picker.
 
 - `delegated` replaces image inputs with separately labeled Vision Evidence from `gpt-5.6-luna`
   and exposes the Hybrid-only `analyze_image` MCP tool.
-- `native` forwards image inputs to the Responses Provider and removes the Hybrid-only vision tool.
+- `native` forwards image inputs to the upstream Provider and removes the Hybrid-only vision tool.
+
+Delegated vision analyzes only images from the latest user turn and subsequent tool output. Earlier
+images are replaced by a short reinspection hint instead of repeatedly consuming context. Optional
+per-model controls are `vision_max_images_per_turn` (1–64, default 8) and
+`vision_failure_policy`: `fail_request` stops the turn when Luna is unavailable, while
+`error_evidence` lets the text model continue with an explicit failure marker and `analyze_image`
+retry guidance.
 
 Official models retain native Codex vision and never see the Hybrid vision tool.
 
@@ -142,9 +156,40 @@ Official models retain native Codex vision and never see the Hybrid vision tool.
 
 Official models bypass this policy and retain Codex's native search behavior.
 
+## Upstream API protocols
+
+Set `api_protocol` per Model Route (or pass `--api-protocol` to `model add`):
+
+- `responses` uses `POST /responses`.
+- `chat_completions` translates requests and responses through `POST /chat/completions`.
+- `anthropic_messages` translates text, native image inputs, adaptive reasoning effort, function
+  tools/results, usage, JSON responses, and SSE through `POST /messages`.
+
+Protocol translation applies only to claimed third-party Model Routes. Unclaimed official models
+continue through the unchanged OpenAI path.
+
+For example, an Anthropic-compatible gateway can be registered without changing the router:
+
+```sh
+codex-hybrid provider add local-anthropic \
+  --base-url http://127.0.0.1:8317/v1 \
+  --keychain-service codex-hybrid-local-anthropic \
+  --keychain-account api-key
+
+codex-hybrid model add local-anthropic example-claude \
+  --display-name "Example Claude" \
+  --upstream-model provider-model-id \
+  --api-protocol anthropic_messages \
+  --context-window 1048576 \
+  --efforts low,medium,high,xhigh,max \
+  --default-effort high \
+  --vision native \
+  --search external
+```
+
 ## Tool protocol profiles
 
-Each Model Route can declare the Responses Provider features it actually supports:
+Each Model Route can declare the upstream Provider features it actually supports:
 
 - `namespaces`: `flatten` converts Codex namespaces into portable function names; `native` preserves them.
 - `custom_tools`: `function` converts freeform tools such as `exec` and `apply_patch`; `native` preserves them.
@@ -219,7 +264,7 @@ are intentionally discarded by the byte-exact restore.
 - `src/provider/`: Provider Registry, capability profiles, fill-first transport, routing, and management.
 - `src/tools/`: immutable per-turn Tool Inventory, Tool Exposure policy, Provider Tool Codec, stream reducer,
   portable collaboration history, lazy tool/skill catalogs, diagnostics, and isolated Vision Capability binding.
-- `src/protocol/`: transport-neutral Responses SSE framing only.
+- `src/protocol/`: transport-neutral Responses SSE plus Chat Completions and Anthropic Messages adapters.
 - `src/vision/`: delegated Vision Evidence workflow and its MCP adapter; it does not own namespace state.
 - `src/activation.mjs`: catalog, Activation Snapshot, launchctl, health, and restore transaction.
 - `src/router.mjs`: HTTP/WebSocket transport adapter.

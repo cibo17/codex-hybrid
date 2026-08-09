@@ -87,6 +87,18 @@ test("validates native and external search modes", () => {
   assert.throws(() => validateRegistry(value), /search_mode is invalid/);
 });
 
+test("validates delegated vision limits and failure policy", () => {
+  const value = defaultRegistry();
+  const model = value.providers["ollama-pro"].models["glm-5.2"];
+  model.vision_max_images_per_turn = 3;
+  model.vision_failure_policy = "error_evidence";
+  const validated = validateRegistry(value).providers["ollama-pro"].models["glm-5.2"];
+  assert.equal(validated.vision_max_images_per_turn, 3);
+  assert.equal(validated.vision_failure_policy, "error_evidence");
+  model.vision_max_images_per_turn = 0;
+  assert.throws(() => validateRegistry(value), /vision_max_images_per_turn/);
+});
+
 test("normalizes and validates provider tool protocol capabilities", () => {
   const value = defaultRegistry();
   value.providers["ollama-pro"].models["glm-5.2"].tool_protocol = {
@@ -103,6 +115,16 @@ test("normalizes and validates provider tool protocol capabilities", () => {
   });
   value.providers["ollama-pro"].models["glm-5.2"].tool_protocol.namespaces = "guess";
   assert.throws(() => validateRegistry(value), /tool_protocol\.namespaces is invalid/);
+});
+
+test("validates per-model upstream API protocols", () => {
+  const value = defaultRegistry();
+  value.providers["ollama-pro"].models["glm-5.2"].api_protocol = "chat_completions";
+  assert.equal(validateRegistry(value).providers["ollama-pro"].models["glm-5.2"].api_protocol, "chat_completions");
+  value.providers["ollama-pro"].models["glm-5.2"].api_protocol = "anthropic_messages";
+  assert.equal(validateRegistry(value).providers["ollama-pro"].models["glm-5.2"].api_protocol, "anthropic_messages");
+  value.providers["ollama-pro"].models["glm-5.2"].api_protocol = "messages";
+  assert.throws(() => validateRegistry(value), /api_protocol is invalid/);
 });
 
 test("resolves all credential sources without exposing policy to callers", () => {

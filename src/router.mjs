@@ -17,6 +17,16 @@ import { ModelRoutingPipeline } from "./provider/routing.mjs";
 import { ProviderRegistry } from "./provider/registry.mjs";
 import { ProviderTransport } from "./provider/transport.mjs";
 import { ResponsesSseAdapter, readResponsesSse } from "./protocol/sse.mjs";
+import {
+  chatCompletionToResponses,
+  readChatCompletionsSse,
+  responsesToChatCompletions,
+} from "./protocol/chat-completions.mjs";
+import {
+  anthropicMessageToResponses,
+  readAnthropicMessagesSse,
+  responsesToAnthropicMessages,
+} from "./protocol/anthropic-messages.mjs";
 import { captureProviderRequest } from "./tools/diagnostics.mjs";
 import { CollaborationHistoryBridge } from "./tools/collaboration-history.mjs";
 import { VisionEvidenceWorkflow } from "./vision/workflow.mjs";
@@ -48,6 +58,10 @@ const providerRegistry = new ProviderRegistry(PROVIDER_REGISTRY_FILE, {
 providerRegistry.ensure();
 function log(message) {
   process.stderr.write(`[codex-hybrid] ${new Date().toISOString()} ${message}\n`);
+}
+
+function writeSseEvent(response, eventName, data) {
+  response.write(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 const visionWorkflow = new VisionEvidenceWorkflow({
@@ -208,16 +222,31 @@ async function handleProxy(request, response) {
   const route = prepared.route;
   const body = prepared.body;
   const toolTurn = prepared.toolTurn;
-  const requestPath = upstreamPath(request.url);
+  const protocol = route?.model.api_protocol || "responses";
+  const providerBody = protocol === "chat_completions"
+    ? responsesToChatCompletions(body)
+    : protocol === "anthropic_messages"
+      ? responsesToAnthropicMessages(body)
+      : body;
+  const requestPath = protocol === "chat_completions"
+    ? "/chat/completions"
+    : protocol === "anthropic_messages"
+      ? "/messages"
+      : upstreamPath(request.url);
+  const upstreamHeaders = copyRequestHeaders(request, route);
+  if (protocol === "anthropic_messages") {
+    upstreamHeaders.set("anthropic-version", "2023-06-01");
+    upstreamHeaders.set("accept", "text/event-stream");
+  }
   const upstreamInit = {
     method: request.method,
-    headers: copyRequestHeaders(request, route),
-    body: decodedBody.length ? JSON.stringify(body) : undefined,
+    headers: upstreamHeaders,
+    body: decodedBody.length ? JSON.stringify(providerBody) : undefined,
     redirect: "manual",
   };
   let upstream;
   if (route) {
-    captureProviderRequest(runtime.root, route, body, { transport: "http" });
+    captureProviderRequest(runtime.root, route, providerBody, { transport: "http" });
     upstream = await providerTransport.request(route, requestPath, upstreamInit);
   } else {
     upstream = await undiciFetch(`${OPENAI_BASE}${requestPath}`, { ...upstreamInit, dispatcher: HTTP_DISPATCHER });
@@ -231,9 +260,33 @@ async function handleProxy(request, response) {
   }
 
   const contentType = upstream.headers.get("content-type") || "";
+  if (route && ["chat_completions", "anthropic_messages"].includes(protocol) && contentType.includes("text/event-stream")) {
+    const reducer = toolTurn.createEventReducer();
+    const readStream = protocol === "chat_completions" ? readChatCompletionsSse : readAnthropicMessagesSse;
+    await readStream(upstream, async (event) => {
+      for (const adapted of reducer.adapt(event.eventName, event.data)) {
+        collaborationBridge.observe(adapted.data);
+        writeSseEvent(response, adapted.eventName, adapted.data);
+      }
+    });
+    response.end();
+    return;
+  }
   const readable = Readable.fromWeb(upstream.body);
   if (route && contentType.includes("text/event-stream")) {
-    const adapter = new ResponsesSseAdapter(toolTurn, { onEvent: (event) => collaborationBridge.observe(event) });
+    let terminalHandled = false;
+    const adapter = new ResponsesSseAdapter(toolTurn, {
+      onEvent: (event) => collaborationBridge.observe(event),
+      onTerminal: () => {
+        if (terminalHandled) return;
+        terminalHandled = true;
+        queueMicrotask(() => {
+          readable.unpipe(adapter);
+          readable.destroy();
+          adapter.end();
+        });
+      },
+    });
     readable.on("error", (error) => handleProviderStreamError(error, response, route.provider.id));
     adapter.on("error", (error) => handleProviderStreamError(error, response, route.provider.id));
     readable.pipe(adapter).pipe(response);
@@ -243,6 +296,16 @@ async function handleProxy(request, response) {
     const chunks = [];
     for await (const chunk of readable) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString("utf8");
+    if (["chat_completions", "anthropic_messages"].includes(protocol)) {
+      const parsed = JSON.parse(text);
+      const portable = protocol === "chat_completions"
+        ? chatCompletionToResponses(parsed)
+        : anthropicMessageToResponses(parsed);
+      const adapted = toolTurn.adaptResponse(portable);
+      collaborationBridge.observe(adapted);
+      response.end(JSON.stringify(adapted));
+      return;
+    }
     try {
       const adapted = toolTurn.adaptResponse(JSON.parse(text));
       collaborationBridge.observe(adapted);
@@ -403,10 +466,14 @@ function createResponsesProviderSession(client, request, providerId) {
     fullInput: [],
     lastOutput: [],
     visionContextId: null,
-    queue: Promise.resolve(),
+    waiting: [],
+    processing: false,
+    closed: false,
+    activeRequest: null,
   };
 
   async function processMessage(message, route) {
+    if (state.closed) return;
     if (message.type !== "response.create") throw new Error(`unsupported websocket message: ${message.type}`);
     if (route.provider.id !== providerId) throw new Error("Responses Provider session route mismatch");
     if (message.generate === false) {
@@ -426,58 +493,136 @@ function createResponsesProviderSession(client, request, providerId) {
     delete requestBody.type;
     delete requestBody.generate;
     delete requestBody.previous_response_id;
+    const controller = new AbortController();
     const prepared = await routingPipeline.prepare(requestBody, {
       transport: "websocket",
       authHeaders: copyRequestHeaders(request),
       accountScope: request.headers["chatgpt-account-id"],
       contextId: state.visionContextId,
     });
+    if (state.closed) return;
     const adaptedBody = prepared.body;
+    const protocol = route.model.api_protocol || "responses";
+    const providerBody = protocol === "chat_completions"
+      ? responsesToChatCompletions(adaptedBody)
+      : protocol === "anthropic_messages"
+        ? responsesToAnthropicMessages(adaptedBody)
+        : adaptedBody;
     state.visionContextId = prepared.contextId;
     state.fullInput = Array.isArray(prepared.historyBody?.input) ? structuredClone(prepared.historyBody.input) : [];
     state.lastOutput = [];
 
-    captureProviderRequest(runtime.root, route, adaptedBody, { transport: "websocket" });
+    captureProviderRequest(runtime.root, route, providerBody, { transport: "websocket" });
 
-    const upstream = await providerTransport.request(route, "/responses", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(adaptedBody),
-    });
-    if (!upstream.ok) {
-      const errorText = await upstream.text();
-      throw new Error(`Responses Provider ${providerId} received HTTP ${upstream.status}: ${errorText.slice(0, 300)}`);
-    }
-
-    const adapter = prepared.toolTurn.createEventReducer();
-    await readResponsesSse(upstream, async ({ eventName, data }) => {
-      for (const event of adapter.adapt(eventName, data)) {
-        collaborationBridge.observe(event.data);
-        if (event.eventName === "response.completed" && Array.isArray(event.data.response?.output)) {
-          state.lastOutput = structuredClone(event.data.response.output);
-        }
-        sendWebSocketEvent(client, event.data);
+    state.activeRequest = controller;
+    try {
+      const headers = { "content-type": "application/json" };
+      if (protocol === "anthropic_messages") {
+        headers["anthropic-version"] = "2023-06-01";
+        headers.accept = "text/event-stream";
       }
-    });
+      const requestPath = protocol === "chat_completions" ? "/chat/completions" : protocol === "anthropic_messages" ? "/messages" : "/responses";
+      const upstream = await providerTransport.request(route, requestPath, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(providerBody),
+        signal: controller.signal,
+      });
+      if (state.closed) {
+        await upstream.body?.cancel(controller.signal.reason).catch(() => {});
+        return;
+      }
+      if (!upstream.ok) {
+        const errorText = await upstream.text();
+        throw new Error(`Responses Provider ${providerId} received HTTP ${upstream.status}: ${errorText.slice(0, 300)}`);
+      }
+
+      const adapter = prepared.toolTurn.createEventReducer();
+      const contentType = upstream.headers.get("content-type") || "";
+      if (["chat_completions", "anthropic_messages"].includes(protocol) && contentType.includes("application/json")) {
+        const parsed = await upstream.json();
+        const portable = protocol === "chat_completions"
+          ? chatCompletionToResponses(parsed)
+          : anthropicMessageToResponses(parsed);
+        const adapted = prepared.toolTurn.adaptResponse(portable);
+        collaborationBridge.observe(adapted);
+        state.lastOutput = Array.isArray(adapted.output) ? structuredClone(adapted.output) : [];
+        sendWebSocketEvent(client, {
+          type: "response.created",
+          response: { ...adapted, status: "in_progress", output: [] },
+        });
+        sendWebSocketEvent(client, {
+          type: adapted.status === "incomplete" ? "response.incomplete" : "response.completed",
+          response: adapted,
+        });
+        return;
+      }
+      const readStream = protocol === "chat_completions"
+        ? readChatCompletionsSse
+        : protocol === "anthropic_messages"
+          ? readAnthropicMessagesSse
+          : readResponsesSse;
+      await readStream(upstream, async ({ eventName, data }) => {
+        if (state.closed) return;
+        for (const event of adapter.adapt(eventName, data)) {
+          collaborationBridge.observe(event.data);
+          if (event.eventName === "response.completed" && Array.isArray(event.data.response?.output)) {
+            state.lastOutput = structuredClone(event.data.response.output);
+          }
+          sendWebSocketEvent(client, event.data);
+        }
+      });
+    } finally {
+      if (state.activeRequest === controller) state.activeRequest = null;
+    }
+  }
+
+  async function drain() {
+    if (state.processing) return;
+    state.processing = true;
+    try {
+      while (!state.closed && state.waiting.length > 0) {
+        const { message, route } = state.waiting.shift();
+        try {
+          await processMessage(message, route);
+        } catch (error) {
+          if (state.closed) return;
+          log(`Responses Provider ${providerId} websocket adapter error: ${error?.message || String(error)}`);
+          sendWebSocketEvent(client, {
+            type: "response.failed",
+            response: {
+              id: `resp_hybrid_failed_${Date.now()}`,
+              object: "response",
+              status: "failed",
+              error: { code: "hybrid_upstream_error", message: `Responses Provider ${providerId} upstream request failed` },
+              output: [],
+            },
+          });
+        }
+      }
+    } finally {
+      state.processing = false;
+      if (state.closed) state.waiting.length = 0;
+    }
   }
 
   function enqueue(message, route) {
-    state.queue = state.queue.then(() => processMessage(message, route)).catch((error) => {
-      log(`Responses Provider ${providerId} websocket adapter error: ${error?.message || String(error)}`);
-      sendWebSocketEvent(client, {
-        type: "response.failed",
-        response: {
-          id: `resp_hybrid_failed_${Date.now()}`,
-          object: "response",
-          status: "failed",
-          error: { code: "hybrid_upstream_error", message: `Responses Provider ${providerId} upstream request failed` },
-          output: [],
-        },
-      });
-    });
+    if (state.closed) return;
+    state.waiting.push({ message, route });
+    void drain();
   }
 
-  return { enqueue };
+  function close() {
+    if (state.closed) return;
+    state.closed = true;
+    state.waiting.length = 0;
+    state.fullInput = [];
+    state.lastOutput = [];
+    state.visionContextId = null;
+    state.activeRequest?.abort(new Error("client websocket disconnected"));
+  }
+
+  return { enqueue, close };
 }
 
 webSocketServer.on("connection", (client, request) => {
@@ -507,9 +652,13 @@ webSocketServer.on("connection", (client, request) => {
   });
   client.on("close", (code, reason) => {
     openAiSession?.close(code, reason);
+    for (const session of providerSessions.values()) session.close();
+    providerSessions.clear();
   });
   client.on("error", () => {
     openAiSession?.close(1011);
+    for (const session of providerSessions.values()) session.close();
+    providerSessions.clear();
   });
 });
 

@@ -22,6 +22,8 @@ export class VisionEvidenceWorkflow {
     log = () => {},
     maxContextAgeMs = 15 * 60 * 1000,
     contextLimit = 128,
+    maxImagesPerTurn = 8,
+    failurePolicy = "fail_request",
     cache = new VisionCache(64, 60 * 60 * 1000),
   }) {
     this.tokenFile = tokenFile;
@@ -32,11 +34,15 @@ export class VisionEvidenceWorkflow {
     this.log = log;
     this.maxContextAgeMs = maxContextAgeMs;
     this.contextLimit = contextLimit;
+    this.maxImagesPerTurn = maxImagesPerTurn;
+    this.failurePolicy = failurePolicy;
     this.cache = cache;
     this.contextDerivationKey = crypto.randomBytes(32);
     this.contexts = new Map();
     this.metrics = {
       inputsReplaced: 0,
+      inputsOmitted: 0,
+      inputsFailed: 0,
       lunaCalls: 0,
       lunaLatencySamples: 0,
       lunaLatencyTotalMs: 0,
@@ -210,17 +216,32 @@ export class VisionEvidenceWorkflow {
     return text;
   }
 
-  async prepareProviderBody(body, { visionMode, headers, accountScope, promptCacheKey, contextId = null, transport = "http" }) {
+  async prepareProviderBody(body, {
+    visionMode,
+    headers,
+    accountScope,
+    promptCacheKey,
+    contextId = null,
+    transport = "http",
+    maxImages = this.maxImagesPerTurn,
+    failurePolicy = this.failurePolicy,
+  }) {
     if (visionMode === "native") return { body: stripHybridVisionTools(body), contextId: null, replaced: 0 };
     const preferredId = contextId || this.stableContextId(accountScope, promptCacheKey);
     const openAiContext = this.rememberContext(headers, preferredId);
     const directImage = latestUserHasDirectImage(body?.input);
-    const prepared = await replaceImagesForTextModel(body, (request) => this.analyzeWithLuna(request, openAiContext.context));
+    const prepared = await replaceImagesForTextModel(
+      body,
+      (request) => this.analyzeWithLuna(request, openAiContext.context),
+      { maxImages, failurePolicy },
+    );
     const result = suppressViewImageTool(prepared.body);
     if (prepared.replaced) {
       this.metrics.inputsReplaced += prepared.replaced;
       this.log(`replaced ${prepared.replaced} ${transport === "websocket" ? "websocket " : ""}image input(s) with parallel per-image ${this.model} evidence${directImage ? "; direct attachment" : ""}`);
     }
+    this.metrics.inputsOmitted += prepared.omitted;
+    this.metrics.inputsFailed += prepared.failed;
     return { body: result, contextId: openAiContext.id, replaced: prepared.replaced };
   }
 
@@ -264,6 +285,10 @@ export class VisionEvidenceWorkflow {
         authContextsCreated: this.metrics.authContextsCreated,
         authContextReuses: this.metrics.authContextReuses,
         inputsReplaced: this.metrics.inputsReplaced,
+        inputsOmitted: this.metrics.inputsOmitted,
+        inputsFailed: this.metrics.inputsFailed,
+        maxImagesPerTurn: this.maxImagesPerTurn,
+        failurePolicy: this.failurePolicy,
         lunaCalls: this.metrics.lunaCalls,
         lunaLatencyMs: {
           last: this.metrics.lunaLatencyLastMs,

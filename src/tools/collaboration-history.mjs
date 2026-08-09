@@ -5,8 +5,12 @@ function isOpenAiCiphertext(value) {
 }
 
 function targetKey(value) {
-  const text = String(value || "").trim().replace(/\/+$/, "");
-  return text.split("/").filter(Boolean).at(-1) || text;
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function targetName(value) {
+  const key = targetKey(value);
+  return key.split("/").filter(Boolean).at(-1) || key;
 }
 
 function taskNameFromContent(content) {
@@ -31,6 +35,18 @@ async function portableContent(content, replacement, resolveEncrypted, item) {
     }
   }
   return output;
+}
+
+function portableInputItem(item) {
+  if (!item || typeof item !== "object") return item;
+  if (item.type === "item_reference") return null;
+  const portable = { ...item };
+  // Responses output-item IDs belong to the provider that minted them. They
+  // are not conversation identities and some providers validate a private
+  // prefix (for example fc_* versus ctc*). Tool-result correlation remains
+  // portable through call_id, so never replay the opaque item id upstream.
+  delete portable.id;
+  return portable;
 }
 
 export class CollaborationHistoryBridge {
@@ -83,7 +99,13 @@ export class CollaborationHistoryBridge {
   #take(target) {
     this.#prune();
     const key = targetKey(target);
-    const index = this.pending.findIndex((entry) => entry.target === key);
+    let index = this.pending.findIndex((entry) => entry.target === key);
+    if (index < 0) {
+      const matches = this.pending
+        .map((entry, entryIndex) => ({ entry, entryIndex }))
+        .filter(({ entry }) => targetName(entry.target) === targetName(key));
+      if (matches.length === 1) index = matches[0].entryIndex;
+    }
     if (index < 0) return null;
     return this.pending.splice(index, 1)[0].message;
   }
@@ -95,7 +117,8 @@ export class CollaborationHistoryBridge {
     for (const item of body.input) {
       if (item?.type === "reasoning") continue;
       if (item?.type !== "agent_message") {
-        input.push(item);
+        const portable = portableInputItem(item);
+        if (portable) input.push(portable);
         continue;
       }
       const replacement = this.#take(item.recipient || taskNameFromContent(item.content));

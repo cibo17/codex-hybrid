@@ -42,6 +42,8 @@ export class ModelRoutingPipeline {
       promptCacheKey,
       contextId,
       transport,
+      maxImages: route.model.vision_max_images_per_turn,
+      failurePolicy: route.model.vision_failure_policy,
     });
     const toolTurn = this.toolCodec.prepare(vision.body, {
       profile: route.model.tool_protocol,

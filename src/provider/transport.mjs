@@ -40,34 +40,88 @@ function waitFor(promise, timeoutMs, kind) {
   ]).finally(() => clearTimeout(timer));
 }
 
+async function readWithSignal(reader, timeoutMs, kind, signal) {
+  if (!signal) return waitFor(reader.read(), timeoutMs, kind);
+  if (signal.aborted) {
+    const reason = signal.reason || new Error("Responses Provider request aborted");
+    await reader.cancel(reason).catch(() => {});
+    throw reason;
+  }
+  let abort;
+  try {
+    return await Promise.race([
+      waitFor(reader.read(), timeoutMs, kind),
+      new Promise((_, reject) => {
+        abort = () => {
+          const reason = signal.reason || new Error("Responses Provider request aborted");
+          void reader.cancel(reason).catch(() => {});
+          reject(reason);
+        };
+        signal.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
 function containsCompleteSseEvent(chunks) {
   const value = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
   return value.includes("\n\n") || value.includes("\r\n\r\n");
 }
 
-function responseWithGuardedBody(response, reader, initialChunks, idleTimeoutMs, onStreamError) {
+function responseWithGuardedBody(response, reader, initialChunks, idleTimeoutMs, onStreamError, signal) {
+  let cancelled = false;
+  let controllerRef = null;
+  let finished = false;
+  const close = () => {
+    if (finished || !controllerRef) return;
+    finished = true;
+    controllerRef.close();
+  };
+  const abort = () => {
+    cancelled = true;
+    void reader.cancel(signal.reason).catch(() => {});
+    close();
+  };
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const removeAbortListener = () => signal?.removeEventListener("abort", abort);
   const body = new ReadableStream({
     start(controller) {
+      controllerRef = controller;
+      if (cancelled) {
+        close();
+        return;
+      }
       for (const chunk of initialChunks) controller.enqueue(chunk);
       void (async () => {
         try {
           for (;;) {
             const chunk = await waitFor(reader.read(), idleTimeoutMs, "stream idle");
+            if (cancelled) return;
             if (chunk.done) {
-              controller.close();
+              close();
+              removeAbortListener();
               return;
             }
             controller.enqueue(chunk.value);
           }
         } catch (error) {
+          if (cancelled) return;
           onStreamError(error);
           await reader.cancel(error).catch(() => {});
+          finished = true;
           controller.error(error);
+        } finally {
+          removeAbortListener();
         }
       })();
     },
     cancel(reason) {
-      return reader.cancel(reason);
+      cancelled = true;
+      removeAbortListener();
+      return reader.cancel(reason).catch(() => {});
     },
   });
   return new Response(body, {
@@ -77,7 +131,7 @@ function responseWithGuardedBody(response, reader, initialChunks, idleTimeoutMs,
   });
 }
 
-async function primeResponse(response, { firstEventTimeoutMs, idleTimeoutMs, onStreamError = () => {} }) {
+async function primeResponse(response, { firstEventTimeoutMs, idleTimeoutMs, onStreamError = () => {}, signal }) {
   if (!response.body) return response;
   const reader = response.body.getReader();
   const chunks = [];
@@ -87,7 +141,12 @@ async function primeResponse(response, { firstEventTimeoutMs, idleTimeoutMs, onS
   try {
     for (;;) {
       const remaining = Math.max(1, deadline - Date.now());
-      const chunk = await waitFor(reader.read(), remaining, isSse ? "first SSE event" : "first response byte");
+      const chunk = await readWithSignal(
+        reader,
+        remaining,
+        isSse ? "first SSE event" : "first response byte",
+        signal,
+      );
       if (chunk.done) break;
       chunks.push(chunk.value);
       size += chunk.value.byteLength;
@@ -98,7 +157,7 @@ async function primeResponse(response, { firstEventTimeoutMs, idleTimeoutMs, onS
     await reader.cancel(error).catch(() => {});
     throw error;
   }
-  return responseWithGuardedBody(response, reader, chunks, idleTimeoutMs, onStreamError);
+  return responseWithGuardedBody(response, reader, chunks, idleTimeoutMs, onStreamError, signal);
 }
 
 function retryAfterMs(response, now, fallback) {
@@ -228,8 +287,10 @@ export class ProviderTransport {
             settings.cooldown_ms,
             error?.message || "stream error",
           ),
+          signal: init.signal,
         });
       } catch (error) {
+        if (init.signal?.aborted) throw error;
         lastError = error;
         this.markCooldown(provider, entry, settings.cooldown_ms, error?.message || "network error");
         if (index + 1 >= candidates.length) throw error;

@@ -37,12 +37,16 @@ test("CLI edits providers, credentials, models, and the active model catalog", (
     "model", "add", "custom", "custom-coder",
     "--context-window", "65536",
     "--vision", "native",
+    "--vision-max-images", "3",
+    "--vision-failure-policy", "error_evidence",
     "--tool-search", "disabled",
   ]);
   const list = run(home, ["provider", "list"]);
   assert.doesNotMatch(list, /visible-key/);
   assert.match(list, /"type": "inline"/);
   assert.match(list, /"tool_search": "disabled"/);
+  assert.match(list, /"vision_max_images_per_turn": 3/);
+  assert.match(list, /"vision_failure_policy": "error_evidence"/);
 
   let catalog = JSON.parse(fs.readFileSync(path.join(root, "models.hybrid.json"), "utf8"));
   assert.equal(catalog.models.find((model) => model.slug === "gpt-5.6-terra").prefer_websockets, true);

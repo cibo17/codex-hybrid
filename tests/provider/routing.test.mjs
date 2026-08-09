@@ -6,7 +6,12 @@ import { ModelRoutingPipeline } from "../../src/provider/routing.mjs";
 function route() {
   return {
     provider: { id: "custom", base_url: "https://example.com/v1", credential: { type: "inline", api_key: "key" } },
-    model: { vision_mode: "delegated", upstream_model: "upstream-custom" },
+    model: {
+      vision_mode: "delegated",
+      vision_max_images_per_turn: 4,
+      vision_failure_policy: "error_evidence",
+      upstream_model: "upstream-custom",
+    },
   };
 }
 
@@ -46,4 +51,6 @@ test("provider models cross one vision and protocol pipeline", async () => {
   assert.equal(result.contextId, "vision-1");
   assert.equal(result.body.prompt_cache_key, undefined);
   assert.equal(calls[0].transport, "websocket");
+  assert.equal(calls[0].maxImages, 4);
+  assert.equal(calls[0].failurePolicy, "error_evidence");
 });

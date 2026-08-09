@@ -120,6 +120,31 @@ test("idle timeout terminates a partially emitted stream without replaying anoth
   assert.deepEqual(authorizations, ["Bearer key-1", "Bearer key-2"]);
 });
 
+test("consumer cancellation after a terminal event does not cool a healthy credential", async () => {
+  const authorizations = [];
+  let requestCount = 0;
+  const transport = new ProviderTransport({
+    fetch: async (_url, init) => {
+      authorizations.push(init.headers.get("authorization"));
+      requestCount += 1;
+      if (requestCount > 1) return completed("NEXT");
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('event: response.completed\ndata: {"type":"response.completed"}\n\n'));
+        },
+      }), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+  const response = await transport.request(route(), "/responses");
+  await response.body.cancel("terminal event received");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(await (await transport.request(route(), "/responses")).text(), /NEXT/);
+  assert.deepEqual(authorizations, ["Bearer key-1", "Bearer key-1"]);
+});
+
 test("legacy single credentials use the same transport interface", async () => {
   let authorization;
   const legacy = route({ credential_pool: null, credential: { type: "inline", api_key: "legacy" } });

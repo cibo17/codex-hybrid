@@ -7,7 +7,9 @@ export const REGISTRY_VERSION = 1;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CREDENTIAL_TYPES = new Set(["inline", "env", "keychain", "none"]);
 const VISION_MODES = new Set(["delegated", "native"]);
+const VISION_FAILURE_POLICIES = new Set(["fail_request", "error_evidence"]);
 const SEARCH_MODES = new Set(["external", "native"]);
+const API_PROTOCOLS = new Set(["responses", "chat_completions", "anthropic_messages"]);
 const POOL_STRATEGIES = new Set(["fill_first"]);
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const CREDENTIAL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -132,8 +134,16 @@ function validateModel(value, providerId, slug) {
   if (!efforts.includes(defaultEffort)) throw new Error(`model ${slug} default reasoning effort is not supported`);
   const visionMode = model.vision_mode || "delegated";
   if (!VISION_MODES.has(visionMode)) throw new Error(`model ${slug} vision_mode is invalid`);
+  const visionMaxImagesPerTurn = Number(model.vision_max_images_per_turn ?? 8);
+  if (!Number.isSafeInteger(visionMaxImagesPerTurn) || visionMaxImagesPerTurn < 1 || visionMaxImagesPerTurn > 64) {
+    throw new Error(`model ${slug} vision_max_images_per_turn must be an integer from 1 to 64`);
+  }
+  const visionFailurePolicy = String(model.vision_failure_policy || "fail_request");
+  if (!VISION_FAILURE_POLICIES.has(visionFailurePolicy)) throw new Error(`model ${slug} vision_failure_policy is invalid`);
   const searchMode = model.search_mode || "external";
   if (!SEARCH_MODES.has(searchMode)) throw new Error(`model ${slug} search_mode is invalid`);
+  const apiProtocol = model.api_protocol || "responses";
+  if (!API_PROTOCOLS.has(apiProtocol)) throw new Error(`model ${slug} api_protocol is invalid`);
   const toolProfile = normalizeProviderToolProfile(model.tool_protocol);
   return {
     display_name: String(model.display_name || `${slug} · ${providerId}`),
@@ -143,7 +153,10 @@ function validateModel(value, providerId, slug) {
     reasoning_efforts: efforts,
     default_reasoning_effort: defaultEffort,
     vision_mode: visionMode,
+    vision_max_images_per_turn: visionMaxImagesPerTurn,
+    vision_failure_policy: visionFailurePolicy,
     search_mode: searchMode,
+    api_protocol: apiProtocol,
     tool_protocol: {
       namespaces: toolProfile.namespaces,
       custom_tools: toolProfile.customTools,

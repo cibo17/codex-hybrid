@@ -80,16 +80,24 @@ function restoreNamespace(item, aliases) {
   if (!item || typeof item !== "object") return item;
   if (["function_call", "tool_search_call"].includes(item.type) && typeof item.name === "string" && !item.namespace) {
     const target = aliases.targetFor(item.name) || directMcpTarget(item.name);
-    if (target) return { ...item, name: target.name, namespace: target.namespace };
+    if (target) {
+      const restored = { ...item, name: target.name };
+      if (target.namespace) restored.namespace = target.namespace;
+      else delete restored.namespace;
+      return restored;
+    }
   }
   return item;
 }
 
 function transformOutputItem(item, state) {
   if (!item || typeof item !== "object") return item;
+  const providerName = item.name;
   let restored = restoreNamespace(structuredClone(item), state.aliases);
   restored = state.vision.decorateCall(restored);
-  const argumentKey = !restored.namespace ? state.customTools.get(restored.name) : undefined;
+  const argumentKey = !restored.namespace
+    ? state.customTools.get(providerName) ?? state.customTools.get(restored.name)
+    : undefined;
   if (restored.type === "function_call" && argumentKey) {
     const { arguments: argumentsText, ...rest } = restored;
     let input = customInputFromArguments(argumentsText, argumentKey);

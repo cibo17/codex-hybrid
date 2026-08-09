@@ -109,7 +109,8 @@ try {
 }
 fs.symlinkSync(path.join(DEST, "bin", "codex-hybrid.mjs"), CLI);
 
-const install = spawnSync("npm", ["ci", "--omit=dev", "--prefix", DEST], {
+const install = spawnSync("npm", ["ci", "--omit=dev"], {
+  cwd: DEST,
   encoding: "utf8",
   stdio: "inherit",
 });

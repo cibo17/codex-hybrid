@@ -134,42 +134,80 @@ function delegatedText(analysis, label = null) {
   ].filter(Boolean).join("\n");
 }
 
-async function transformImages(value, analyze, prompt, stats, label = null) {
+function omittedImageText(reason) {
+  return { type: "input_text", text: `[Hybrid vision: ${reason}]` };
+}
+
+function omitImages(value, reason) {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((child) => omitImages(child, reason));
+  if (value.type === "input_image" && typeof value.image_url === "string") return omittedImageText(reason);
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, omitImages(child, reason)]));
+}
+
+async function transformImages(value, analyze, prompt, stats, options, label = null) {
   if (!value || typeof value !== "object") return value;
   if (Array.isArray(value)) {
     let imageNumber = 0;
     return Promise.all(value.map((child) => {
       const childLabel = child?.type === "input_image" ? `Image ${++imageNumber}` : null;
-      return transformImages(child, analyze, prompt, stats, childLabel);
+      return transformImages(child, analyze, prompt, stats, options, childLabel);
     }));
   }
   if (value.type === "input_image" && typeof value.image_url === "string") {
-    const analysis = await analyze({
-      image_url: value.image_url,
-      detail: value.detail ?? "high",
-      prompt,
-      mode: "automatic",
-      label,
-    });
-    stats.replaced += 1;
-    return { type: "input_text", text: delegatedText(analysis, label) };
+    const slot = stats.scheduled++;
+    if (slot >= options.maxImages) {
+      stats.omitted += 1;
+      return omittedImageText(`image omitted because this turn exceeds the ${options.maxImages}-image automatic-analysis limit; call analyze_image for focused inspection`);
+    }
+    try {
+      const analysis = await analyze({
+        image_url: value.image_url,
+        detail: value.detail ?? "high",
+        prompt,
+        mode: "automatic",
+        label,
+      });
+      stats.replaced += 1;
+      return { type: "input_text", text: delegatedText(analysis, label) };
+    } catch (error) {
+      if (options.failurePolicy === "fail_request") throw error;
+      stats.failed += 1;
+      return omittedImageText("automatic analysis failed; call analyze_image to retry with a focused prompt");
+    }
   }
   const localPrompt = value.role === "user" && Array.isArray(value.content)
     ? contentText(value.content) || prompt
     : prompt;
   const output = {};
   for (const [key, child] of Object.entries(value)) {
-    output[key] = await transformImages(child, analyze, localPrompt, stats);
+    output[key] = await transformImages(child, analyze, localPrompt, stats, options);
   }
   return output;
 }
 
-export async function replaceImagesForTextModel(originalBody, analyze) {
+export async function replaceImagesForTextModel(originalBody, analyze, {
+  maxImages = 8,
+  failurePolicy = "fail_request",
+} = {}) {
+  if (!Number.isSafeInteger(maxImages) || maxImages < 1) throw new Error("maxImages must be a positive integer");
+  if (!["fail_request", "error_evidence"].includes(failurePolicy)) throw new Error("invalid vision failure policy");
   const prompt = latestUserText(originalBody?.input) || "Describe the image accurately for the downstream coding agent.";
-  const stats = { replaced: 0 };
+  const stats = { replaced: 0, omitted: 0, failed: 0, scheduled: 0 };
   const body = structuredClone(originalBody);
-  const transformed = await transformImages(body, analyze, prompt, stats);
-  return { body: transformed, replaced: stats.replaced };
+  if (!Array.isArray(body?.input)) return { body, replaced: 0, omitted: 0, failed: 0 };
+
+  let latestUserIndex = -1;
+  for (let index = 0; index < body.input.length; index += 1) {
+    if (body.input[index]?.role === "user") latestUserIndex = index;
+  }
+  body.input = await Promise.all(body.input.map((item, index) => {
+    if (latestUserIndex >= 0 && index < latestUserIndex) {
+      return omitImages(item, "earlier image omitted; use analyze_image for a focused reinspection");
+    }
+    return transformImages(item, analyze, prompt, stats, { maxImages, failurePolicy });
+  }));
+  return { body, replaced: stats.replaced, omitted: stats.omitted, failed: stats.failed };
 }
 
 function mimeFromBytes(bytes, filePath) {

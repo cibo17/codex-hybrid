@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { compactExecTool } from "./exec-catalog.mjs";
 
-const FUNCTION_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const FUNCTION_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 const MAX_FUNCTION_NAME = 64;
 const HYBRID_VISION_NAMESPACE = "mcp__hybrid_vision";
 
@@ -24,6 +24,12 @@ function preferredAlias(namespace, name) {
   if (candidate.length <= MAX_FUNCTION_NAME && FUNCTION_NAME_RE.test(candidate)) return candidate;
   const digest = crypto.createHash("sha256").update(tupleKey(namespace, name)).digest("hex").slice(0, 24);
   return `hybrid_ns_${digest}`;
+}
+
+function preferredDirectAlias(name) {
+  if (name.length <= MAX_FUNCTION_NAME && FUNCTION_NAME_RE.test(name)) return name;
+  const digest = crypto.createHash("sha256").update(`direct\u0000${name}`).digest("hex").slice(0, 24);
+  return `hybrid_fn_${digest}`;
 }
 
 export function directMcpTarget(name) {
@@ -66,6 +72,24 @@ function stripExaToolCollections(value) {
   for (const child of Object.values(value)) stripExaToolCollections(child);
 }
 
+function isNativeSearchTool(tool) {
+  return ["web_search", "web_search_preview"].includes(tool?.type);
+}
+
+function stripNativeSearchCollections(value) {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const child = value[index];
+      if (["web_search_call", "web_search_call_output"].includes(child?.type)) value.splice(index, 1);
+      else stripNativeSearchCollections(child);
+    }
+    return;
+  }
+  if (Array.isArray(value.tools)) value.tools = value.tools.filter((tool) => !isNativeSearchTool(tool));
+  for (const child of Object.values(value)) stripNativeSearchCollections(child);
+}
+
 function stripToolSearch(value) {
   if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {
@@ -83,6 +107,7 @@ function stripToolSearch(value) {
 export class ToolAliasTable {
   #aliases = new Map();
   #tuples = new Map();
+  #direct = new Map();
 
   register(alias, namespace, name) {
     if (!alias || !namespace || !name) return false;
@@ -96,6 +121,19 @@ export class ToolAliasTable {
 
   aliasFor(namespace, name) {
     return this.#tuples.get(tupleKey(namespace, name));
+  }
+
+  registerDirect(alias, name) {
+    if (!alias || !name) return false;
+    const existing = this.#aliases.get(alias);
+    if (existing && (existing.namespace || existing.name !== name)) return false;
+    this.#aliases.set(alias, { name });
+    if (!this.#direct.has(name)) this.#direct.set(name, alias);
+    return true;
+  }
+
+  aliasForDirect(name) {
+    return this.#direct.get(name);
   }
 
   targetFor(alias) {
@@ -126,6 +164,9 @@ export class ExposurePlanner {
     if (nativeSearch) {
       stripExaToolCollections(body);
       if (isExaTool(body.tool_choice) || isExaTool(body.tool_choice?.function)) body.tool_choice = "auto";
+    } else {
+      stripNativeSearchCollections(body);
+      if (isNativeSearchTool(body.tool_choice) || isNativeSearchTool(body.tool_choice?.function)) body.tool_choice = "auto";
     }
     if (profile.toolSearch === "disabled") stripToolSearch(body);
     if (profile.namespaces === "native") return new ExposurePlan({ body });
@@ -158,8 +199,16 @@ export class ExposurePlanner {
       if (entry.source === "deferred" && keepDeferred && entry.namespace !== HYBRID_VISION_NAMESPACE) return false;
       return this.namespaceIsActive(inventory, entry.namespace);
     });
+    const directAliases = new Map();
+    for (const tool of allTools) {
+      if (tool?.type === "namespace" || typeof tool?.name !== "string") continue;
+      const alias = preferredDirectAlias(tool.name);
+      if (alias !== tool.name && aliases.registerDirect(alias, tool.name)) directAliases.set(tool.name, alias);
+    }
     const directNames = new Set(
-      allTools.filter((tool) => tool?.type !== "namespace" && typeof tool?.name === "string").map((tool) => tool.name),
+      allTools
+        .filter((tool) => tool?.type !== "namespace" && typeof tool?.name === "string")
+        .map((tool) => directAliases.get(tool.name) || tool.name),
     );
     const shortCounts = new Map();
     for (const entry of activeEntries) shortCounts.set(entry.name, (shortCounts.get(entry.name) || 0) + 1);
@@ -173,7 +222,13 @@ export class ExposurePlanner {
       outputTools.push(clone(tool));
     };
     for (const tool of allTools) {
-      if (tool?.type !== "namespace") emit(compactExecTool(tool, inventory.demandText));
+      if (tool?.type !== "namespace") {
+        const exposed = clone(tool);
+        if (typeof exposed?.name === "string" && directAliases.has(exposed.name)) {
+          exposed.name = directAliases.get(exposed.name);
+        }
+        emit(compactExecTool(exposed, inventory.demandText));
+      }
     }
     for (const entry of activeEntries) {
       let alias = preferredAlias(entry.namespace, entry.name);
@@ -211,6 +266,11 @@ function flattenHistoryValue(value, aliases) {
     aliases.register(alias, value.namespace, value.name);
     value.name = alias;
     delete value.namespace;
+  } else if (
+    ["function_call", "custom_tool_call", "tool_search_call"].includes(value.type) &&
+    typeof value.name === "string"
+  ) {
+    value.name = aliases.aliasForDirect(value.name) ?? value.name;
   }
   for (const child of Object.values(value)) flattenHistoryValue(child, aliases);
 }
@@ -218,13 +278,24 @@ function flattenHistoryValue(value, aliases) {
 function flattenToolChoice(body, aliases) {
   const choice = body?.tool_choice;
   if (!choice || typeof choice !== "object") return;
-  const targets = [choice, choice.function].filter((value) => value && typeof value === "object");
-  for (const target of targets) {
-    if (typeof target.name !== "string" || typeof target.namespace !== "string") continue;
-    const alias = aliases.aliasFor(target.namespace, target.name) ?? preferredAlias(target.namespace, target.name);
-    aliases.register(alias, target.namespace, target.name);
-    target.name = alias;
-    delete target.namespace;
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
+    if (typeof value.name === "string") {
+      if (typeof value.namespace === "string") {
+        const alias = aliases.aliasFor(value.namespace, value.name) ?? preferredAlias(value.namespace, value.name);
+        aliases.register(alias, value.namespace, value.name);
+        value.name = alias;
+        delete value.namespace;
+      } else {
+        value.name = aliases.aliasForDirect(value.name) ?? value.name;
+      }
+    }
+    for (const child of Object.values(value)) visit(child);
   }
+  visit(choice);
   delete choice.namespace;
 }

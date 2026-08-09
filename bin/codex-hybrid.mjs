@@ -116,7 +116,12 @@ function modelCommand(args) {
       reasoning_efforts: typeof options.efforts === "string" ? options.efforts.split(",").filter(Boolean) : undefined,
       default_reasoning_effort: typeof options["default-effort"] === "string" ? options["default-effort"] : undefined,
       vision_mode: typeof options.vision === "string" ? options.vision : "delegated",
+      vision_max_images_per_turn: Number(options["vision-max-images"] || 8),
+      vision_failure_policy: typeof options["vision-failure-policy"] === "string"
+        ? options["vision-failure-policy"]
+        : "fail_request",
       search_mode: typeof options.search === "string" ? options.search : "external",
+      api_protocol: typeof options["api-protocol"] === "string" ? options["api-protocol"] : "responses",
       tool_protocol: {
         namespaces: typeof options.namespaces === "string" ? options.namespaces : "flatten",
         custom_tools: typeof options["custom-tools"] === "string" ? options["custom-tools"] : "function",

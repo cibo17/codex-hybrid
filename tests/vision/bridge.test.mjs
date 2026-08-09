@@ -102,7 +102,7 @@ test("replaces direct and tool-output images with delegated text", async () => {
   assert.match(result.body.input[0].content[1].text, /not an error from the vision bridge/);
 });
 
-test("keeps an image tied to its own user prompt on later sampling rounds", async () => {
+test("omits images from earlier user turns instead of reinjecting their evidence", async () => {
   const calls = [];
   await replaceImagesForTextModel({
     input: [
@@ -119,8 +119,30 @@ test("keeps an image tied to its own user prompt on later sampling rounds", asyn
     calls.push(request);
     return "analysis";
   });
+  assert.equal(calls.length, 0);
+});
+
+test("limits automatic analysis per turn and leaves a focused retry hint", async () => {
+  const calls = [];
+  const result = await replaceImagesForTextModel({
+    input: [{ role: "user", content: [
+      { type: "input_image", image_url: "data:image/png;base64,AAA" },
+      { type: "input_image", image_url: "data:image/png;base64,BBB" },
+    ] }],
+  }, async (request) => { calls.push(request); return "analysis"; }, { maxImages: 1 });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].prompt, "Read the original error");
+  assert.equal(result.replaced, 1);
+  assert.equal(result.omitted, 1);
+  assert.match(result.body.input[0].content[1].text, /analyze_image/);
+});
+
+test("can turn an automatic analysis failure into explicit evidence", async () => {
+  const result = await replaceImagesForTextModel({
+    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAA" }] }],
+  }, async () => { throw new Error("sidecar unavailable"); }, { failurePolicy: "error_evidence" });
+  assert.equal(result.failed, 1);
+  assert.match(result.body.input[0].content[0].text, /automatic analysis failed/);
+  assert.doesNotMatch(result.body.input[0].content[0].text, /sidecar unavailable/);
 });
 
 test("analyzes multiple images in parallel and preserves per-image evidence positions", async () => {

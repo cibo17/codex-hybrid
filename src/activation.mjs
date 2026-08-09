@@ -19,6 +19,7 @@ const STATE = runtime.stateFile;
 const PLIST = runtime.launchAgentFile;
 const LABEL = "com.openai.codex-hybrid-router";
 const PORT = runtime.port;
+const CHATGPT_CODEX_BASE = "https://chatgpt.com/backend-api/codex";
 const registryEditor = new ProviderRegistryEditor(PROVIDERS);
 
 function fail(message) {
@@ -91,9 +92,18 @@ function removeTopLevelAssignment(text, key) {
   return lines.join("\n");
 }
 
-function buildHybridConfig(original) {
+export function buildHybridConfig(original) {
   let text = original;
   text = setTopLevelAssignment(text, "openai_base_url", `openai_base_url = "http://127.0.0.1:${PORT}/v1"`);
+  // Realtime WebRTC calls use a non-JSON multipart request when Codex sees a
+  // generic /v1 API base. Keep Voice on Codex's native ChatGPT backend so the
+  // embedded CLI selects the backend JSON request shape while model inference
+  // continues to use the Hybrid router.
+  text = setTopLevelAssignment(
+    text,
+    "experimental_realtime_webrtc_call_base_url",
+    `experimental_realtime_webrtc_call_base_url = "${CHATGPT_CODEX_BASE}"`,
+  );
   text = setTopLevelAssignment(text, "model_catalog_json", `model_catalog_json = "${HYBRID_CATALOG}"`);
   const lines = text.split("\n");
   for (const server of ["hybrid_vision"]) {
