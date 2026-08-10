@@ -90,11 +90,39 @@ function restoreNamespace(item, aliases) {
   return item;
 }
 
+function reasoningTextContent(item) {
+  if (!Array.isArray(item?.content)) return [];
+  return item.content.filter(
+    (part) => part?.type === "reasoning_text" && typeof part.text === "string",
+  );
+}
+
+function projectProviderReasoning(item, providerId) {
+  if (item?.type !== "reasoning" || !providerId) return item;
+  const rawContent = reasoningTextContent(item);
+  const nativeSummary = Array.isArray(item.summary) ? item.summary : [];
+  const summary = nativeSummary.length
+    ? structuredClone(nativeSummary)
+    : rawContent.map((part) => ({ type: "summary_text", text: part.text }));
+  const metadata = {
+    ...(item.internal_chat_message_metadata_passthrough || {}),
+    hybrid_provider_id: providerId,
+  };
+  if (rawContent.length) metadata.hybrid_reasoning_content = structuredClone(rawContent);
+  return {
+    ...item,
+    summary,
+    content: [],
+    internal_chat_message_metadata_passthrough: metadata,
+  };
+}
+
 function transformOutputItem(item, state) {
   if (!item || typeof item !== "object") return item;
   const providerName = item.name;
   let restored = restoreNamespace(structuredClone(item), state.aliases);
   restored = state.vision.decorateCall(restored);
+  restored = projectProviderReasoning(restored, state.providerId);
   const argumentKey = !restored.namespace
     ? state.customTools.get(providerName) ?? state.customTools.get(restored.name)
     : undefined;
@@ -125,6 +153,8 @@ class ToolCallReducer {
     this.customNames = new Map();
     this.argumentBuffers = new Map();
     this.visionToolKeys = new Set();
+    this.reasoningKeys = new Set();
+    this.reasoningSummaryParts = new Set();
   }
 
   keyFor(data) {
@@ -135,6 +165,7 @@ class ToolCallReducer {
     if (eventName === "response.output_item.added") {
       const originalItem = originalData?.item;
       const key = this.keyFor({ ...originalData, ...originalItem });
+      if (originalItem?.type === "reasoning") this.reasoningKeys.add(key);
       if (this.state.vision.isCall(originalItem)) this.visionToolKeys.add(key);
       if (originalItem?.type === "function_call" && this.state.customTools.has(originalItem.name)) {
         this.customToolKeys.set(key, this.state.customTools.get(originalItem.name));
@@ -142,6 +173,67 @@ class ToolCallReducer {
       }
     }
     let data = transformResponse(originalData, this.state);
+
+    const reasoningKey = this.keyFor({ ...data, ...(data?.item || {}) });
+    const isReasoningItemAdded = eventName === "response.output_item.added"
+      && (data?.item?.type === "reasoning" || this.reasoningKeys.has(reasoningKey));
+    const isReasoningItemDone = eventName === "response.output_item.done"
+      && (data?.item?.type === "reasoning" || this.reasoningKeys.has(reasoningKey));
+    const isReasoningPartEvent = ["response.content_part.added", "response.content_part.done"].includes(eventName)
+      && (data?.part?.type === "reasoning_text" || this.reasoningKeys.has(reasoningKey));
+    if (isReasoningItemDone) {
+      this.reasoningKeys.delete(reasoningKey);
+      return [{ eventName, data }];
+    }
+    if (eventName === "response.reasoning_text.delta") {
+      const summaryIndex = Number.isInteger(data.content_index) ? data.content_index : 0;
+      const partKey = `${reasoningKey}:${summaryIndex}`;
+      const events = [];
+      if (!this.reasoningSummaryParts.has(partKey)) {
+        this.reasoningSummaryParts.add(partKey);
+        events.push({
+          eventName: "response.reasoning_summary_part.added",
+          data: {
+            ...data,
+            type: "response.reasoning_summary_part.added",
+            summary_index: summaryIndex,
+            part: { type: "summary_text", text: "" },
+          },
+        });
+      }
+      events.push({
+        eventName: "response.reasoning_summary_text.delta",
+        data: {
+          ...data,
+          type: "response.reasoning_summary_text.delta",
+          summary_index: summaryIndex,
+        },
+      });
+      // Codex's sequential-cutoff renderer intentionally ignores summary
+      // deltas for OpenAI-compatible providers and only surfaces `done`
+      // events. Mirror each provider delta as an atomic cutoff as well: the
+      // desktop keeps streaming immediately, while Remote still receives the
+      // structured summary channel instead of raw reasoning events.
+      events.push({
+        eventName: "response.reasoning_summary_text.done",
+        data: {
+          ...data,
+          type: "response.reasoning_summary_text.done",
+          summary_index: summaryIndex,
+          text: data.delta || "",
+        },
+      });
+      return events;
+    }
+    if (eventName === "response.reasoning_text.done") {
+      // Every raw delta was already emitted as a summary cutoff. Replaying the
+      // provider's cumulative done text would duplicate the visible summary.
+      return [];
+    }
+    if (isReasoningItemAdded) return [{ eventName, data }];
+    if (isReasoningPartEvent) {
+      return [];
+    }
 
     if (eventName === "response.function_call_arguments.delta") {
       const key = this.keyFor(data);
@@ -204,12 +296,12 @@ export class ProviderToolTurn {
     Object.freeze(this);
   }
 
-  adaptResponse(value) {
-    return transformResponse(value, this.#state);
+  adaptResponse(value, { providerId = null } = {}) {
+    return transformResponse(value, { ...this.#state, providerId });
   }
 
-  createEventReducer() {
-    return new ToolCallReducer(this.#state);
+  createEventReducer({ providerId = null } = {}) {
+    return new ToolCallReducer({ ...this.#state, providerId });
   }
 }
 

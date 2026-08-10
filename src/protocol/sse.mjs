@@ -40,11 +40,11 @@ export function parseSseBlock(block) {
 }
 
 export class ResponsesSseAdapter extends Transform {
-  constructor(turn, { onEvent = () => {}, onTerminal = () => {} } = {}) {
+  constructor(turn, { onEvent = () => {}, onTerminal = () => {}, providerId = null } = {}) {
     super();
     this.buffer = "";
     this.decoder = new StringDecoder("utf8");
-    this.reducer = turn.createEventReducer();
+    this.reducer = turn.createEventReducer({ providerId });
     this.onEvent = onEvent;
     this.onTerminal = onTerminal;
     this.terminalSeen = false;

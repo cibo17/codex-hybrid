@@ -161,6 +161,118 @@ test("HTTP object and streamed completion use the same turn codec", () => {
   assert.deepEqual(events[0].data.response, objectResult.response);
 });
 
+test("provider raw reasoning is projected as client summary and retained privately", () => {
+  const turn = new ProviderToolCodec().prepare({ input: [] });
+  const reducer = turn.createEventReducer({ providerId: "opencode-go" });
+  const reasoning = {
+    id: "reasoning-1",
+    type: "reasoning",
+    summary: [],
+    content: [{ type: "reasoning_text", text: "private chain of thought" }],
+    encrypted_content: null,
+  };
+
+  const added = reducer.adapt("response.output_item.added", {
+    output_index: 0,
+    item: { ...reasoning, content: [] },
+  });
+  assert.equal(added.length, 1);
+  assert.deepEqual(added[0].data.item.content, []);
+  assert.deepEqual(added[0].data.item.summary, []);
+  assert.deepEqual(reducer.adapt("response.content_part.added", {
+    item_id: reasoning.id,
+    output_index: 0,
+    content_index: 0,
+    part: { type: "reasoning_text", text: "" },
+  }), []);
+  const delta = reducer.adapt("response.reasoning_text.delta", {
+    item_id: reasoning.id,
+    output_index: 0,
+    content_index: 0,
+    delta: "private chain",
+  });
+  assert.deepEqual(delta.map((event) => event.eventName), [
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+  ]);
+  assert.equal(delta[1].data.summary_index, 0);
+  assert.equal(delta[1].data.delta, "private chain");
+  assert.equal(delta[2].data.summary_index, 0);
+  assert.equal(delta[2].data.text, "private chain");
+  const secondDelta = reducer.adapt("response.reasoning_text.delta", {
+    item_id: reasoning.id,
+    output_index: 0,
+    content_index: 0,
+    delta: " of thought",
+  });
+  assert.deepEqual(secondDelta.map((event) => event.eventName), [
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+  ]);
+  assert.equal(secondDelta[1].data.text, " of thought");
+  const done = reducer.adapt("response.reasoning_text.done", {
+    item_id: reasoning.id,
+    output_index: 0,
+    content_index: 0,
+    text: "private chain of thought",
+  });
+  assert.deepEqual(done, []);
+  const completedItem = reducer.adapt("response.output_item.done", {
+    output_index: 0,
+    item: reasoning,
+  });
+  assert.equal(completedItem.length, 1);
+  assert.deepEqual(completedItem[0].data.item.content, []);
+  assert.equal(completedItem[0].data.item.summary[0].text, "private chain of thought");
+  assert.equal(
+    completedItem[0].data.item.internal_chat_message_metadata_passthrough.hybrid_provider_id,
+    "opencode-go",
+  );
+  assert.equal(
+    completedItem[0].data.item.internal_chat_message_metadata_passthrough.hybrid_reasoning_content[0].text,
+    "private chain of thought",
+  );
+
+  const terminal = reducer.adapt("response.completed", {
+    type: "response.completed",
+    response: { id: "response-1", status: "completed", output: [reasoning] },
+  });
+  assert.equal(terminal.length, 1);
+  assert.equal(
+    terminal[0].data.response.output[0].internal_chat_message_metadata_passthrough.hybrid_provider_id,
+    "opencode-go",
+  );
+  assert.deepEqual(terminal[0].data.response.output[0].content, []);
+  assert.equal(terminal[0].data.response.output[0].summary[0].text, "private chain of thought");
+  assert.equal(
+    terminal[0].data.response.output[0].internal_chat_message_metadata_passthrough.hybrid_reasoning_content[0].text,
+    "private chain of thought",
+  );
+});
+
+test("native provider reasoning summaries remain native and raw content stays private", () => {
+  const turn = new ProviderToolCodec().prepare({ input: [] });
+  const reducer = turn.createEventReducer({ providerId: "bytedance" });
+  const reasoning = {
+    id: "reasoning-native-summary",
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "provider summary" }],
+    content: [{ type: "reasoning_text", text: "provider private reasoning" }],
+  };
+
+  const completed = reducer.adapt("response.output_item.done", {
+    output_index: 0,
+    item: reasoning,
+  });
+  assert.equal(completed[0].data.item.summary[0].text, "provider summary");
+  assert.deepEqual(completed[0].data.item.content, []);
+  assert.equal(
+    completed[0].data.item.internal_chat_message_metadata_passthrough.hybrid_reasoning_content[0].text,
+    "provider private reasoning",
+  );
+});
+
 test("vision capability is turn-local for direct and code-mode calls", () => {
   const turn = new ProviderToolCodec().prepare({ tools: [
     { type: "custom", name: "exec" },

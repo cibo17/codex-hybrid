@@ -261,7 +261,7 @@ async function handleProxy(request, response) {
 
   const contentType = upstream.headers.get("content-type") || "";
   if (route && ["chat_completions", "anthropic_messages"].includes(protocol) && contentType.includes("text/event-stream")) {
-    const reducer = toolTurn.createEventReducer();
+    const reducer = toolTurn.createEventReducer({ providerId: route.provider.id });
     const readStream = protocol === "chat_completions" ? readChatCompletionsSse : readAnthropicMessagesSse;
     await readStream(upstream, async (event) => {
       for (const adapted of reducer.adapt(event.eventName, event.data)) {
@@ -277,6 +277,7 @@ async function handleProxy(request, response) {
     let terminalHandled = false;
     const adapter = new ResponsesSseAdapter(toolTurn, {
       onEvent: (event) => collaborationBridge.observe(event),
+      providerId: route.provider.id,
       onTerminal: () => {
         if (terminalHandled) return;
         terminalHandled = true;
@@ -301,13 +302,13 @@ async function handleProxy(request, response) {
       const portable = protocol === "chat_completions"
         ? chatCompletionToResponses(parsed)
         : anthropicMessageToResponses(parsed);
-      const adapted = toolTurn.adaptResponse(portable);
+      const adapted = toolTurn.adaptResponse(portable, { providerId: route.provider.id });
       collaborationBridge.observe(adapted);
       response.end(JSON.stringify(adapted));
       return;
     }
     try {
-      const adapted = toolTurn.adaptResponse(JSON.parse(text));
+      const adapted = toolTurn.adaptResponse(JSON.parse(text), { providerId: route.provider.id });
       collaborationBridge.observe(adapted);
       response.end(JSON.stringify(adapted));
     } catch {
@@ -537,14 +538,14 @@ function createResponsesProviderSession(client, request, providerId) {
         throw new Error(`Responses Provider ${providerId} received HTTP ${upstream.status}: ${errorText.slice(0, 300)}`);
       }
 
-      const adapter = prepared.toolTurn.createEventReducer();
+      const adapter = prepared.toolTurn.createEventReducer({ providerId });
       const contentType = upstream.headers.get("content-type") || "";
       if (["chat_completions", "anthropic_messages"].includes(protocol) && contentType.includes("application/json")) {
         const parsed = await upstream.json();
         const portable = protocol === "chat_completions"
           ? chatCompletionToResponses(parsed)
           : anthropicMessageToResponses(parsed);
-        const adapted = prepared.toolTurn.adaptResponse(portable);
+        const adapted = prepared.toolTurn.adaptResponse(portable, { providerId });
         collaborationBridge.observe(adapted);
         state.lastOutput = Array.isArray(adapted.output) ? structuredClone(adapted.output) : [];
         sendWebSocketEvent(client, {

@@ -33,6 +33,7 @@ export class ModelRoutingPipeline {
     const portableBody = this.collaborationBridge
       ? await this.collaborationBridge.prepareProviderBody(body, {
         resolveEncrypted: (item) => this.visionWorkflow.decodeAgentPayload(item, authHeaders),
+        providerId: route.provider.id,
       })
       : body;
     const vision = await this.visionWorkflow.prepareProviderBody(portableBody, {

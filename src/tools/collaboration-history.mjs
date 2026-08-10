@@ -49,6 +49,28 @@ function portableInputItem(item) {
   return portable;
 }
 
+function portableProviderReasoning(item, providerId) {
+  if (item?.type !== "reasoning") return null;
+  const metadata = item.internal_chat_message_metadata_passthrough;
+  const content = Array.isArray(item.content) && item.content.length
+    ? item.content
+    : metadata?.hybrid_reasoning_content;
+  if (!Array.isArray(content)) return null;
+  const hasReasoningText = content.some(
+    (part) => part?.type === "reasoning_text" && typeof part.text === "string",
+  );
+  if (!hasReasoningText) return null;
+  const origin = metadata?.hybrid_provider_id;
+  if (typeof origin === "string" && origin !== providerId) return null;
+  // Official reasoning item IDs use rs_*. Untagged non-rs IDs are accepted as
+  // legacy Hybrid provider output so tasks created before provider tagging can
+  // still finish their active tool-call chain.
+  if (!origin && /^rs_/i.test(String(item.id || ""))) return null;
+  const portable = { ...item, content: structuredClone(content) };
+  delete portable.internal_chat_message_metadata_passthrough;
+  return portable;
+}
+
 export class CollaborationHistoryBridge {
   constructor({ now = () => Date.now(), ttlMs = 5 * 60 * 1000, limit = 128 } = {}) {
     this.now = now;
@@ -110,12 +132,16 @@ export class CollaborationHistoryBridge {
     return this.pending.splice(index, 1)[0].message;
   }
 
-  async prepareProviderBody(originalBody, { resolveEncrypted = null } = {}) {
+  async prepareProviderBody(originalBody, { resolveEncrypted = null, providerId = null } = {}) {
     const body = structuredClone(originalBody);
     if (!Array.isArray(body?.input)) return body;
     const input = [];
     for (const item of body.input) {
-      if (item?.type === "reasoning") continue;
+      if (item?.type === "reasoning") {
+        const reasoning = portableProviderReasoning(item, providerId);
+        if (reasoning) input.push(reasoning);
+        continue;
+      }
       if (item?.type !== "agent_message") {
         const portable = portableInputItem(item);
         if (portable) input.push(portable);

@@ -23,6 +23,67 @@ test("provider history drops reasoning and converts plaintext agent messages", a
   }]);
 });
 
+test("same-provider reasoning text survives tool-call continuation without leaking across providers", async () => {
+  const bridge = new CollaborationHistoryBridge();
+  const tagged = {
+    type: "reasoning",
+    id: "provider-reasoning-1",
+    summary: [],
+    content: [{ type: "reasoning_text", text: "private provider reasoning" }],
+    encrypted_content: null,
+    internal_chat_message_metadata_passthrough: {
+      turn_id: "turn-1",
+      hybrid_provider_id: "opencode-go",
+    },
+  };
+
+  const same = await bridge.prepareProviderBody({ input: [tagged] }, { providerId: "opencode-go" });
+  assert.equal(same.input[0].content[0].text, "private provider reasoning");
+  assert.equal(same.input[0].internal_chat_message_metadata_passthrough, undefined);
+
+  const other = await bridge.prepareProviderBody({ input: [tagged] }, { providerId: "ollama-pro" });
+  assert.deepEqual(other.input, []);
+});
+
+test("hidden client reasoning content is restored only for its originating provider", async () => {
+  const bridge = new CollaborationHistoryBridge();
+  const hidden = {
+    type: "reasoning",
+    id: "provider-reasoning-hidden",
+    content: [],
+    internal_chat_message_metadata_passthrough: {
+      hybrid_provider_id: "opencode-go",
+      hybrid_reasoning_content: [{ type: "reasoning_text", text: "restore upstream only" }],
+    },
+  };
+
+  const same = await bridge.prepareProviderBody({ input: [hidden] }, { providerId: "opencode-go" });
+  assert.equal(same.input[0].content[0].text, "restore upstream only");
+  assert.equal(same.input[0].internal_chat_message_metadata_passthrough, undefined);
+  const other = await bridge.prepareProviderBody({ input: [hidden] }, { providerId: "ollama-pro" });
+  assert.deepEqual(other.input, []);
+});
+
+test("legacy provider reasoning remains resumable while untagged official reasoning is dropped", async () => {
+  const bridge = new CollaborationHistoryBridge();
+  const body = await bridge.prepareProviderBody({ input: [
+    {
+      type: "reasoning",
+      id: "4bd18e9d-79f1-4ac8-ae82-47b349dcd65f",
+      content: [{ type: "reasoning_text", text: "legacy provider reasoning" }],
+      encrypted_content: null,
+    },
+    {
+      type: "reasoning",
+      id: "rs_official",
+      content: [{ type: "reasoning_text", text: "official reasoning" }],
+      encrypted_content: "gAAAAAofficial",
+    },
+  ] }, { providerId: "opencode-go" });
+
+  assert.deepEqual(body.input.map((item) => item.id), ["4bd18e9d-79f1-4ac8-ae82-47b349dcd65f"]);
+});
+
 test("removes provider-owned item ids while preserving portable call correlation", async () => {
   const bridge = new CollaborationHistoryBridge();
   const body = await bridge.prepareProviderBody({ input: [
